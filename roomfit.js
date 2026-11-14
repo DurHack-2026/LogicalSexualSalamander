@@ -15,7 +15,6 @@ var uid = 1;
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function hash(s) { var h = 5381; for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h; }
-function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function gbp(n) { return '£' + Math.round(n).toLocaleString('en-GB'); }
 function lum(hex) {
 var c = hex.replace('#', '');
@@ -38,6 +37,7 @@ if (r.shape === 'bay') {
 }
 return [[0, 0], [w, 0], [w, l], [0, l]];
 }
+
 function roomOpenings(r) {
 var w = r.w, l = r.l, d1 = 30, d2 = Math.min(120, w - 30);
 var door = { x0: d1, x1: d2, y: l };
@@ -52,6 +52,7 @@ if (r.shape === 'L') {
 }
 return { door: door, win: win };
 }
+
 function polyArea(p) {
 var a = 0;
 for (var i = 0; i < p.length; i++) { var q = p[(i + 1) % p.length]; a += p[i][0] * q[1] - q[0] * p[i][1]; }
@@ -173,6 +174,37 @@ return {
     id: uid++, name: name, cat: base.id, w: w, d: d, h: h, shape: shape, color: colour, material: material,
     price: price, x: room.w / 2, y: room.l / 2, rot: 0, url: s, retailer: retailer, prov: prov
 };
+}
+
+function extractedColour(value) {
+if (typeof value !== 'string') return null;
+var hex = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+if (hex) {
+    var code = hex[1];
+    return '#' + (code.length === 3 ? code.split('').map(function (c) { return c + c; }).join('') : code);
+}
+var words = value.toLowerCase().match(/[a-z]+/g) || [];
+for (var i = 0; i < words.length; i++) {
+    if (COLOURS[words[i]]) return COLOURS[words[i]];
+    if (MAT_COLOUR[words[i]]) return COLOURS[MAT_COLOUR[words[i]]];
+}
+return null;
+}
+
+function applyProductData(item, product) {
+if (product.name) item.name = product.name;
+if (product.image) item.image = product.image;
+var dimensions = [product.widthCm, product.depthCm, product.heightCm];
+if (dimensions.every(function (value) { return Number.isFinite(value) && value >= 10 && value <= 500; })) {
+    item.w = dimensions[0]; item.d = dimensions[1]; item.h = dimensions[2]; item.prov.size = 'link';
+}
+if (product.material) { item.material = product.material; item.prov.material = 'link'; }
+var color = extractedColour(product.color);
+if (color) { item.color = color; item.prov.colour = 'link'; }
+if (Number.isFinite(product.price) && product.price >= 0 && (!product.priceCurrency || product.priceCurrency.toUpperCase() === 'GBP')) {
+    item.price = product.price; item.prov.price = 'link';
+}
+return item;
 }
 
 /* =====================================================
@@ -529,24 +561,18 @@ roomChanged();
 document.querySelectorAll('input[name=shape]').forEach(function (r) { r.addEventListener('change', readRoom); });
 
 /* ---------- link extraction UI ---------- */
-var SAMPLES = [
-'https://northfield-furniture.example/gb/p/halden-3-seater-sofa-sage-velvet-210x92x84',
-'https://oakhaus.example/products/lund-oak-coffee-table-round-90x90x40',
-'https://oakhaus.example/products/vik-walnut-tv-unit-sideboard-160x40x55',
-'https://stillwater-home.example/p/ember-floor-lamp-black-metal',
-'https://northfield-furniture.example/gb/p/tove-wool-rug-grey-200x140',
-'https://oakhaus.example/products/mara-king-bed-linen-beige',
-'https://stillwater-home.example/p/orla-corner-sofa-navy-fabric-£1150'
-];
-var sampleBox = $('#samples');
-SAMPLES.forEach(function (u) {
-var b = document.createElement('button'); b.type = 'button'; b.className = 'chip';
-var host = new URL(u).pathname.split('/').pop().split('-').slice(0, 3).join('-');
-b.textContent = host; b.title = u;
-b.addEventListener('click', function () { var t = $('#links'); t.value = (t.value.trim() ? t.value.trim() + '\n' : '') + u; });
-sampleBox.appendChild(b);
-});
 function logLine(text, cls) { var li = document.createElement('li'); if (cls) li.className = cls; li.textContent = text; $('#log').appendChild(li); $('#log').scrollTop = 1e6; return li; }
+function apiRequest(path, payload) {
+return fetch(path, {
+    method: payload === undefined ? 'GET' : 'POST',
+    headers: payload === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload)
+}).then(async function (response) {
+    var body = await response.json();
+    if (!response.ok) throw new Error(body.error || 'The extraction service returned an error.');
+    return body;
+});
+}
 var busy = false;
 $('#extractBtn').addEventListener('click', async function () {
 if (busy) return;
@@ -555,37 +581,49 @@ $('#log').innerHTML = '';
 if (!lines.length) { logLine('Paste at least one furniture link first.', 'err'); return; }
 busy = true; this.disabled = true; this.textContent = 'Reading links…';
 var added = 0;
-for (var i = 0; i < lines.length; i++) {
-    var short = lines[i].replace(/^https?:\/\//, '').slice(0, 48);
-    var l1 = logLine('Opening ' + short + '…');
-    await sleep(280);
-    logLine('Reading title, size, material, colour, price…');
-    await sleep(320);
-    var it = extract(lines[i]);
-    if (!it) { logLine('Could not read "' + short + '". Check the link and try again.', 'err'); continue; }
-    var spot = freeSpot(it); it.x = spot[0]; it.y = spot[1];
-    items.push(it); selId = it.id; added++;
-    var li = logLine('Added ' + it.name + ' · ' + Math.round(it.w) + '×' + Math.round(it.d) + '×' + Math.round(it.h) + ' cm · ' + it.material + ' · ' + gbp(it.price), 'ok');
-    edited(); fillEditor();
+var button = this;
+try {
+    if (!window.RoomfitProductExtractor) throw new Error('Product extractor did not load. Reload the page and try again.');
+    var config = await apiRequest('/api/config');
+    if (!config.pageFetcherConfigured) throw new Error('Page fetching is not configured. Set ROOMFIT_PAGE_FETCH_URL in the server environment.');
+    var adapters = {
+        fetchPage: function (url) { return apiRequest('/api/fetch-page', { url: url }); },
+        extractStructured: config.llmConfigured
+            ? function (input) { return apiRequest('/api/extract-structured', input); }
+            : null
+    };
+    for (var i = 0; i < lines.length; i++) {
+        var short = lines[i].replace(/^https?:\/\//, '').slice(0, 48);
+        logLine('Reading ' + short + '…');
+        try {
+            var it = extract(lines[i]);
+            if (!it) throw new Error('Enter a valid product URL.');
+            var product = await window.RoomfitProductExtractor.extractFurnitureProduct(lines[i], adapters);
+            it = applyProductData(it, product);
+            var spot = freeSpot(it); it.x = spot[0]; it.y = spot[1];
+            items.push(it); selId = it.id; added++;
+            logLine('Added ' + it.name + ' · ' + Math.round(it.w) + '×' + Math.round(it.d) + '×' + Math.round(it.h) + ' cm · ' + it.material + ' · ' + gbp(it.price), 'ok');
+            edited(); fillEditor();
+        } catch (error) {
+            logLine('Could not extract "' + short + '": ' + error.message, 'err');
+        }
+    }
+    if (added) $('#links').value = '';
+} catch (error) {
+    logLine(error.message, 'err');
+} finally {
+    busy = false; button.disabled = false; button.textContent = 'Extract details';
 }
-if (added) { $('#links').value = ''; }
-busy = false; this.disabled = false; this.textContent = 'Extract details';
 });
 
-/* ---------- seed example ---------- */
-function seed() {
+/* ---------- initial room ---------- */
+function resetRoom() {
 uid = 1; items = []; selId = null;
 room = { shape: 'rect', w: 420, l: 360, h: 250 };
 $('#rw').value = 420; $('#rl').value = 360; $('#rh').value = 250; $('#sh-rect').checked = true;
-var plan = [
-    [SAMPLES[4], 250, 200, 0], [SAMPLES[0], 255, 300, 180], [SAMPLES[1], 250, 195, 0],
-    [SAMPLES[2], 210, 28, 0], [SAMPLES[3], 385, 55, 0]
-];
-plan.forEach(function (p) { var it = extract(p[0]); it.x = p[1]; it.y = p[2]; it.rot = p[3]; items.push(it); });
-selId = items[1].id;
 roomChanged(); fillEditor();
 }
-$('#resetBtn').addEventListener('click', seed);
+$('#resetBtn').addEventListener('click', resetRoom);
 
 /* =====================================================
     3D view (three.js)
@@ -741,6 +779,7 @@ items.forEach(function (it) { var g = build3DItem(it); T.itemsG.add(g); T.groups
 orbit.dist = clamp(Math.max(room.w, room.l) * 1.5, 450, 2200);
 sync3D(true);
 }
+
 function sync3D(noRender) {
 if (!T.ready) return;
 var cx = room.w / 2, cy = room.l / 2;
@@ -784,7 +823,7 @@ new MutationObserver(function () { drawPlan(); updateStats(); if (T.ready) rebui
 
 /* ---------- boot ---------- */
 bindEditor();
-seed();
+resetRoom();
 if (window.ResizeObserver) new ResizeObserver(function () { if (!$('#planBox').hidden) { sizePlan(); drawPlan(); } }).observe($('#planBox'));
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { drawPlan(); });
 })();
