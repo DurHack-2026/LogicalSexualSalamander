@@ -229,8 +229,27 @@ function additionalPropertyText(product) {
     }).filter(Boolean).join(' | ');
 }
 
+function isIkeaHostname(hostname) {
+    return hostname === 'ikea.com' || hostname.endsWith('.ikea.com');
+}
+
+function ikeaImageUrl(value, pageUrl) {
+    var image = text(value);
+    if (!image) return null;
+    try {
+        var parsed = new URL(image, pageUrl);
+        if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+            !parsed.username && !parsed.password && !parsed.port && isIkeaHostname(parsed.hostname)) {
+            return parsed.href;
+        }
+    } catch (error) {
+        return null;
+    }
+    return null;
+}
+
 function isIkeaPage(url) {
-    return (url.hostname === 'ikea.com' || url.hostname.endsWith('.ikea.com')) &&
+    return isIkeaHostname(url.hostname) &&
         !/\.(png|jpe?g|gif|webp|avif)$/i.test(url.pathname);
 }
 
@@ -259,6 +278,7 @@ function ikeaProductImage(documentNode, pageUrl) {
         } catch (error) {
             return;
         }
+        if (!isIkeaHostname(new URL(image).hostname)) return;
         var key = new URL(image).pathname;
         var candidate = { description: imageElement.alt || '', image: image, resolution: bestSource.resolution };
         var previous = allCandidates.get(key);
@@ -271,21 +291,123 @@ function ikeaProductImage(documentNode, pageUrl) {
     });
     var images = productCandidates.length ? productCandidates : candidates;
     if (!images.length) return null;
+    return images[0].image;
+}
 
-    var transparentImage = images.find(function (candidate) { return /\.png(?:[?#]|$)/i.test(candidate.image); });
-    function imageScore(candidate) {
-        var description = candidate.description.toLowerCase();
-        return [
-            ['plain background', 5], ['white background', 5], ['isolated', 4],
-            ['cutout', 4], ['elegant', 3], ['clear', 1], ['with', 1]
-        ].reduce(function (total, cue) {
-            return total + (description.indexOf(cue[0]) >= 0 ? cue[1] : 0);
-        }, 0) - (/\b(room|bedroom|kitchen|office|table|surrounded|interior|lifestyle)\b|red wine stands/i.test(description) ? 10 : 0);
+function dominantPixelColor(imageData, width, height) {
+    var data = imageData.data;
+    var cornerPoints = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
+    var corners = cornerPoints.map(function (point) {
+        var index = (point[1] * width + point[0]) * 4;
+        return data[index + 3] >= 180 ? [data[index], data[index + 1], data[index + 2]] : null;
+    }).filter(Boolean);
+    var background = null;
+    if (corners.length === 4) {
+        var average = [0, 0, 0];
+        corners.forEach(function (color) {
+            for (var channel = 0; channel < 3; channel++) average[channel] += color[channel] / corners.length;
+        });
+        var uniform = corners.every(function (color) {
+            return Math.hypot(color[0] - average[0], color[1] - average[1], color[2] - average[2]) < 36;
+        });
+        if (uniform) background = average;
     }
-    var cleanImage = images.reduce(function (best, candidate) {
-        return imageScore(candidate) > imageScore(best) ? candidate : best;
-    }, images[0]);
-    return (transparentImage || cleanImage).image;
+
+    var histogram = Object.create(null);
+    var foregroundCount = 0, opaqueCount = 0;
+    function addPixel(index) {
+        if (data[index + 3] < 180) return;
+        opaqueCount++;
+        var color = [data[index], data[index + 1], data[index + 2]];
+        if (background && Math.hypot(color[0] - background[0], color[1] - background[1], color[2] - background[2]) < 36) return;
+        addColor(color);
+    }
+    function addColor(color) {
+        foregroundCount++;
+        var key = (color[0] >> 5) + ',' + (color[1] >> 5) + ',' + (color[2] >> 5);
+        var bucket = histogram[key] || (histogram[key] = { count: 0, red: 0, green: 0, blue: 0 });
+        bucket.count++; bucket.red += color[0]; bucket.green += color[1]; bucket.blue += color[2];
+    }
+    for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) addPixel((y * width + x) * 4);
+    }
+    if (!foregroundCount || foregroundCount < opaqueCount * 0.08) {
+        histogram = Object.create(null);
+        foregroundCount = 0;
+        for (var i = 0; i < data.length; i += 4) {
+            if (data[i + 3] >= 180) addColor([data[i], data[i + 1], data[i + 2]]);
+        }
+    }
+
+    var keys = Object.keys(histogram);
+    if (!keys.length) return null;
+    var dominant = keys.reduce(function (best, key) {
+        return !best || histogram[key].count > histogram[best].count ? key : best;
+    }, null);
+    var bucket = histogram[dominant];
+    return '#' + [
+        Math.round(bucket.red / bucket.count),
+        Math.round(bucket.green / bucket.count),
+        Math.round(bucket.blue / bucket.count)
+    ].map(function (channel) { return channel.toString(16).padStart(2, '0'); }).join('');
+}
+
+function sampleProductImageColor(imageUrl, fetchImage) {
+    var parsedImage;
+    try {
+        parsedImage = new URL(imageUrl);
+    } catch (error) {
+        return Promise.reject(new Error('The product image URL is invalid.'));
+    }
+    if (!isIkeaHostname(parsedImage.hostname)) {
+        return Promise.reject(new Error('The product image is not hosted on an IKEA domain.'));
+    }
+
+    return Promise.resolve(typeof fetchImage === 'function' ? fetchImage(parsedImage.href) : parsedImage.href).then(function (source) {
+        var objectUrl = null;
+        if (typeof Blob !== 'undefined' && source instanceof Blob) {
+            objectUrl = URL.createObjectURL(source);
+            source = objectUrl;
+        }
+        if (typeof source !== 'string') throw new TypeError('The image fetcher must return a Blob or image URL.');
+
+        return new Promise(function (resolve, reject) {
+            var image = new Image();
+            var timer = setTimeout(function () {
+                image.src = '';
+                reject(new Error('Timed out while loading the IKEA product image.'));
+            }, 15000);
+            function finish(error, color) {
+                clearTimeout(timer);
+                if (error) reject(error);
+                else resolve(color);
+            }
+            image.onload = function () {
+                try {
+                    var scale = Math.min(1, 64 / Math.max(image.naturalWidth, image.naturalHeight));
+                    var width = Math.max(1, Math.round(image.naturalWidth * scale));
+                    var height = Math.max(1, Math.round(image.naturalHeight * scale));
+                    var canvas = document.createElement('canvas');
+                    canvas.width = width; canvas.height = height;
+                    var context = canvas.getContext('2d', { willReadFrequently: true });
+                    if (!context) throw new Error('Could not create a canvas to sample the product image.');
+                    context.drawImage(image, 0, 0, width, height);
+                    var color = dominantPixelColor(context.getImageData(0, 0, width, height), width, height);
+                    if (!color) throw new Error('No visible pixels were found in the IKEA product image.');
+                    finish(null, color);
+                } catch (error) {
+                    finish(error.name === 'SecurityError'
+                        ? new Error('The browser blocked access to IKEA image pixels.')
+                        : error);
+                }
+            };
+            image.onerror = function () { finish(new Error('Could not load the IKEA product image for colour sampling.')); };
+            if (!objectUrl) image.crossOrigin = 'anonymous';
+            image.src = source;
+        }).finally(function () {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+        });
+    });
 }
 
 function parsePage(html, pageUrl) {
@@ -327,6 +449,7 @@ function parsePage(html, pageUrl) {
     result.priceCurrency = result.priceCurrency || metaContent(documentNode, 'product:price:currency', 'property');
     result.name = result.name || metaContent(documentNode, 'twitter:title', 'name');
     result.image = result.image || metaContent(documentNode, 'twitter:image', 'name');
+    result.image = ikeaImageUrl(result.image, pageUrl);
     return { product: result, text: extractPageText(documentNode) };
 }
 
@@ -370,7 +493,7 @@ function extractFurnitureProduct(url, adapters) {
         return Promise.reject(new TypeError('Provide a fetchPage adapter for an authorized page-fetching service.'));
     }
 
-    return Promise.resolve(adapters.fetchPage(parsedUrl.href)).then(function (page) {
+    return Promise.resolve(adapters.fetchPage(parsedUrl.href)).then(async function (page) {
         if (typeof page === 'string') page = { html: page, markdown: '' };
         if (!page || typeof page !== 'object') throw new TypeError('fetchPage must return HTML or an object containing html and markdown.');
         var html = typeof page.html === 'string' ? page.html : '';
@@ -380,19 +503,30 @@ function extractFurnitureProduct(url, adapters) {
         var pageData = html ? parsePage(html, parsedUrl.href) : { product: emptyProduct(), text: '' };
         var extracted = pageData.product;
         fillMissing(extracted, extractDimensionsFromText(pageData.text + ' ' + markdown));
+        var imageColorError = null;
+        if (extracted.image) {
+            try {
+                extracted.color = await sampleProductImageColor(extracted.image, adapters.fetchImage);
+            } catch (error) {
+                imageColorError = error.message;
+            }
+        } else {
+            imageColorError = 'No product image was found on the IKEA page.';
+        }
         var needsSpecs = extracted.widthCm == null || extracted.depthCm == null || extracted.heightCm == null || extracted.material == null;
         var llmContent = [markdown, pageData.text ? 'Additional text extracted from HTML specifications and accordions:\n' + pageData.text : '']
             .filter(Boolean).join('\n\n').slice(0, 80000);
-        if (!needsSpecs || !llmContent || typeof adapters.extractStructured !== 'function') return extracted;
-
-        return Promise.resolve(adapters.extractStructured({
-            url: parsedUrl.href,
-            markdown: llmContent,
-            existing: Object.assign({}, extracted),
-            schema: PRODUCT_SCHEMA
-        })).then(function (modelResult) {
-            return fillMissing(extracted, normalizeModelResult(modelResult));
-        });
+        if (needsSpecs && llmContent && typeof adapters.extractStructured === 'function') {
+            var modelResult = await adapters.extractStructured({
+                url: parsedUrl.href,
+                markdown: llmContent,
+                existing: Object.assign({}, extracted),
+                schema: PRODUCT_SCHEMA
+            });
+            fillMissing(extracted, normalizeModelResult(modelResult));
+        }
+        if (imageColorError) extracted.imageColorError = imageColorError;
+        return extracted;
     });
 }
 

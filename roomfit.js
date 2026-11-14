@@ -6,7 +6,7 @@ var cssv = function (n) { return getComputedStyle(document.documentElement).getP
 var DEG = Math.PI / 180;
 
 /* ---------- state ---------- */
-var room = { shape: 'rect', w: 420, l: 360, h: 250 };
+var room = { shape: 'rect', w: 420, l: 360, h: 250, wallColor: '#2B3A35', transparentWalls: true };
 var items = [];
 var selId = null;
 var uid = 1;
@@ -217,7 +217,7 @@ var item = createFurnitureFallback(raw);
 if (!item) return null;
 if (!isIkeaHostname(new URL(item.url).hostname)) throw new Error('Roomfit currently accepts IKEA product links only.');
 var product = await window.RoomfitProductExtractor.extractFurnitureProduct(raw, adapters);
-return applyProductData(item, product);
+return { item: applyProductData(item, product), imageColorError: product.imageColorError || null };
 }
 
 /* =====================================================
@@ -351,7 +351,7 @@ ctx.restore(); ctx.globalAlpha = 1;
 
 /* walls */
 ctx.beginPath(); poly.forEach(function (p, i) { i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1])); }); ctx.closePath();
-ctx.strokeStyle = cssv('--wall'); ctx.lineWidth = 6; ctx.lineJoin = 'miter'; ctx.stroke();
+ctx.strokeStyle = room.wallColor; ctx.lineWidth = 6; ctx.lineJoin = 'miter'; ctx.stroke();
 
 /* window */
 ctx.strokeStyle = cssv('--accent'); ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(sx(op.win.x0), sy(op.win.y)); ctx.lineTo(sx(op.win.x1), sy(op.win.y)); ctx.stroke();
@@ -493,6 +493,25 @@ var iss = computeIssues();
 items.forEach(function (it) {
     var li = document.createElement('li'); li.className = 'item'; li.tabIndex = 0;
     if (it.id === selId) li.setAttribute('aria-current', 'true');
+    var thumb = document.createElement('span'); thumb.className = 'thumb'; thumb.setAttribute('aria-hidden', 'true');
+    if (it.image) {
+        var imageUrl;
+        try {
+            var parsedImage = new URL(it.image);
+            if ((parsedImage.protocol === 'http:' || parsedImage.protocol === 'https:') && isIkeaHostname(parsedImage.hostname)) {
+                imageUrl = parsedImage.href;
+            }
+        } catch (error) {
+            imageUrl = null;
+        }
+        if (imageUrl) {
+            var image = document.createElement('img');
+            image.alt = ''; image.loading = 'lazy'; image.decoding = 'async';
+            image.src = '/api/fetch-image?url=' + encodeURIComponent(imageUrl);
+            image.addEventListener('error', function () { thumb.classList.add('unavailable'); image.remove(); });
+            thumb.appendChild(image);
+        }
+    }
     var sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = it.color;
     var mid = document.createElement('div'); mid.style.minWidth = '0';
     var nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = it.name;
@@ -501,7 +520,7 @@ items.forEach(function (it) {
     mid.appendChild(nm); mid.appendChild(meta);
     var pr = document.createElement('span'); pr.className = 'pr'; pr.textContent = gbp(it.price);
     var dot = document.createElement('span'); dot.className = 'dot' + (iss.bad[it.id] ? ' bad' : ''); dot.title = iss.bad[it.id] ? 'Has a problem' : 'Fits';
-    li.appendChild(sw); li.appendChild(mid); li.appendChild(pr); li.appendChild(dot);
+    li.appendChild(thumb); li.appendChild(sw); li.appendChild(mid); li.appendChild(pr); li.appendChild(dot);
     var pick = function () { selId = it.id; renderList(); fillEditor(); drawPlan(); };
     li.addEventListener('click', pick);
     li.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
@@ -570,8 +589,25 @@ room.w = w; room.l = l; room.h = h;
 var sh = document.querySelector('input[name=shape]:checked'); room.shape = sh ? sh.value : 'rect';
 roomChanged();
 }
+function readWallColor() {
+var input = $('#wallColor'), value = input.value.trim();
+var valid = /^#[0-9a-f]{6}$/i.test(value);
+input.setCustomValidity(valid ? '' : 'Enter a six-digit hex colour, e.g. #2B3A35.');
+input.setAttribute('aria-invalid', String(!valid));
+$('#wallColorError').hidden = valid;
+if (!valid) return;
+room.wallColor = value.toUpperCase();
+drawPlan();
+if (T.ready) rebuild3D();
+}
+function readWallTransparency() {
+room.transparentWalls = $('#transparentWalls').checked;
+if (T.ready) rebuild3D();
+}
 ['#rw', '#rl', '#rh'].forEach(function (s) { $(s).addEventListener('input', readRoom); });
 document.querySelectorAll('input[name=shape]').forEach(function (r) { r.addEventListener('change', readRoom); });
+$('#wallColor').addEventListener('input', readWallColor);
+$('#transparentWalls').addEventListener('change', readWallTransparency);
 
 /* ---------- link extraction UI ---------- */
 function logLine(text, cls) { var li = document.createElement('li'); if (cls) li.className = cls; li.textContent = text; $('#log').appendChild(li); $('#log').scrollTop = 1e6; return li; }
@@ -612,6 +648,15 @@ try {
     if (!config.pageFetcherConfigured) throw new Error('The IKEA page fetcher is unavailable. Restart the Roomfit server and try again.');
     var adapters = {
         fetchPage: function (url) { return apiRequest('/api/fetch-page', { url: url }); },
+        fetchImage: async function (url) {
+            var response = await fetch('/api/fetch-image?url=' + encodeURIComponent(url));
+            if (!response.ok) {
+                var body;
+                try { body = await response.json(); } catch (error) { body = null; }
+                throw new Error(body && body.error ? body.error : 'The IKEA image service returned HTTP ' + response.status + '.');
+            }
+            return response.blob();
+        },
         extractStructured: config.llmConfigured
             ? function (input) { return apiRequest('/api/extract-structured', input); }
             : null
@@ -620,11 +665,13 @@ try {
         var short = lines[i].replace(/^https?:\/\//, '').slice(0, 48);
         logLine('Reading ' + short + '…');
         try {
-            var it = await extract(lines[i], adapters);
-            if (!it) throw new Error('Enter a valid product URL.');
+            var extraction = await extract(lines[i], adapters);
+            if (!extraction) throw new Error('Enter a valid product URL.');
+            var it = extraction.item;
             var spot = freeSpot(it); it.x = spot[0]; it.y = spot[1];
             items.push(it); selId = it.id; added++;
             logLine('Added ' + it.name + ' · ' + Math.round(it.w) + '×' + Math.round(it.d) + '×' + Math.round(it.h) + ' cm · ' + it.material + ' · ' + gbp(it.price), 'ok');
+            if (extraction.imageColorError) logLine('Image colour was not detected; using the available colour fallback. ' + extraction.imageColorError, 'err');
             edited(); fillEditor();
         } catch (error) {
             logLine('Could not extract "' + short + '": ' + error.message, 'err');
@@ -641,8 +688,12 @@ try {
 /* ---------- initial room ---------- */
 function resetRoom() {
 uid = 1; items = []; selId = null;
-room = { shape: 'rect', w: 420, l: 360, h: 250 };
+var defaultWallColor = cssv('--wall') || '#2B3A35';
+room = { shape: 'rect', w: 420, l: 360, h: 250, wallColor: defaultWallColor, transparentWalls: true };
 $('#rw').value = 420; $('#rl').value = 360; $('#rh').value = 250; $('#sh-rect').checked = true;
+$('#wallColor').value = defaultWallColor.toUpperCase();
+$('#wallColor').setCustomValidity(''); $('#wallColor').setAttribute('aria-invalid', 'false'); $('#wallColorError').hidden = true;
+$('#transparentWalls').checked = true;
 roomChanged(); fillEditor();
 }
 $('#resetBtn').addEventListener('click', resetRoom);
@@ -782,13 +833,18 @@ var fg = new THREE.ShapeGeometry(shp); fg.rotateX(-Math.PI / 2);
 var floor = new THREE.Mesh(fg, new THREE.MeshLambertMaterial({ color: new THREE.Color(cssv('--floor')), side: THREE.DoubleSide }));
 T.roomG.add(floor);
 /* walls */
-var wallCol = new THREE.Color(cssv('--wall'));
+var wallCol = new THREE.Color(room.wallColor);
 for (var i = 0; i < poly.length; i++) {
     var a = poly[i], b = poly[(i + 1) % poly.length];
     var dx = b[0] - a[0], dz = b[1] - a[1], len = Math.hypot(dx, dz), ang = Math.atan2(dz, dx);
-    var wm = new THREE.Mesh(new THREE.BoxGeometry(len, H, 8), new THREE.MeshLambertMaterial({ color: wallCol, transparent: true, opacity: 0.22, depthWrite: false }));
+    var wallOpacity = room.transparentWalls ? 0.22 : 1;
+    var wm = new THREE.Mesh(new THREE.BoxGeometry(len, H, 8), new THREE.MeshLambertMaterial({
+        color: wallCol, transparent: room.transparentWalls, opacity: wallOpacity, depthWrite: !room.transparentWalls
+    }));
     wm.position.set((a[0] + b[0]) / 2 - cx, H / 2, (a[1] + b[1]) / 2 - cy); wm.rotation.y = -ang;
-    wm.add(new THREE.LineSegments(new THREE.EdgesGeometry(wm.geometry), new THREE.LineBasicMaterial({ color: wallCol, transparent: true, opacity: 0.6 })));
+    wm.add(new THREE.LineSegments(new THREE.EdgesGeometry(wm.geometry), new THREE.LineBasicMaterial({
+        color: wallCol, transparent: room.transparentWalls, opacity: room.transparentWalls ? 0.6 : 1
+    })));
     T.roomG.add(wm);
 }
 var op = roomOpenings(room);

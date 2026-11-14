@@ -78,24 +78,24 @@ function checkedIkeaUrl(value) {
     return url;
 }
 
-async function readPageText(response) {
+async function readResourceBytes(response) {
     const contentLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(contentLength) && contentLength > MAX_PAGE_BYTES) {
-        throw new Error('IKEA returned a page that is too large to process.');
+        throw new Error('IKEA returned a resource that is too large to process.');
     }
-    if (!response.body) return '';
+    if (!response.body) return Buffer.alloc(0);
 
     let size = 0;
     const chunks = [];
     for await (const chunk of response.body) {
         size += chunk.length;
-        if (size > MAX_PAGE_BYTES) throw new Error('IKEA returned a page that is too large to process.');
+        if (size > MAX_PAGE_BYTES) throw new Error('IKEA returned a resource that is too large to process.');
         chunks.push(chunk);
     }
-    return Buffer.concat(chunks).toString('utf8');
+    return Buffer.concat(chunks);
 }
 
-async function fetchIkeaPage(value) {
+async function fetchIkeaResource(value, accept, expectedType) {
     let currentUrl = checkedIkeaUrl(value);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
@@ -105,12 +105,12 @@ async function fetchIkeaPage(value) {
             try {
                 response = await fetch(currentUrl.href, {
                     method: 'GET',
-                    headers: { 'Accept': 'text/html,application/xhtml+xml' },
+                    headers: { 'Accept': accept },
                     redirect: 'manual',
                     signal: controller.signal
                 });
             } catch (error) {
-                throw new Error(error.name === 'AbortError' ? 'IKEA page request timed out.' : 'IKEA page request failed.');
+                throw new Error(error.name === 'AbortError' ? 'IKEA resource request timed out.' : 'IKEA resource request failed.');
             }
 
             if ([301, 302, 303, 307, 308].indexOf(response.status) >= 0) {
@@ -122,18 +122,30 @@ async function fetchIkeaPage(value) {
                 continue;
             }
             if (!response.ok) throw new Error('IKEA returned HTTP ' + response.status + '.');
-            const contentType = response.headers.get('content-type') || '';
-            if (contentType && !/(text\/html|application\/xhtml\+xml)/i.test(contentType)) {
+            const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+            if (expectedType === 'html' && contentType && !/(text\/html|application\/xhtml\+xml)/i.test(contentType)) {
                 throw new Error('IKEA did not return an HTML product page.');
             }
-            const html = await readPageText(response);
-            if (!html) throw new Error('IKEA returned an empty product page.');
-            return { html: html, markdown: '' };
+            if (expectedType === 'image' && !/^image\/(png|jpeg|webp|avif|gif)$/.test(contentType)) {
+                throw new Error('IKEA did not return a supported product image.');
+            }
+            const body = await readResourceBytes(response);
+            if (!body.length) throw new Error('IKEA returned an empty resource.');
+            return { body: body, contentType: contentType || (expectedType === 'html' ? 'text/html' : 'image/jpeg') };
         }
-        throw new Error('Could not follow IKEA page redirects.');
+        throw new Error('Could not follow IKEA resource redirects.');
     } finally {
         clearTimeout(timeout);
     }
+}
+
+async function fetchIkeaPage(value) {
+    const page = await fetchIkeaResource(value, 'text/html,application/xhtml+xml', 'html');
+    return { html: page.body.toString('utf8'), markdown: '' };
+}
+
+async function fetchIkeaImage(value) {
+    return fetchIkeaResource(value, 'image/avif,image/webp,image/png,image/jpeg,image/*', 'image');
 }
 
 async function callProvider(endpoint, token, payload, label) {
@@ -167,12 +179,23 @@ async function callProvider(endpoint, token, payload, label) {
     }
 }
 
-async function handleApi(request, response, pathname) {
+async function handleApi(request, response, requestUrl) {
+    const pathname = requestUrl.pathname;
     const llmUrl = process.env.ROOMFIT_LLM_URL;
     const llmToken = process.env.ROOMFIT_LLM_TOKEN;
 
     if (request.method === 'GET' && pathname === '/api/config') {
         sendJson(response, 200, { pageFetcherConfigured: true, ikeaOnly: true, llmConfigured: Boolean(llmUrl) });
+        return;
+    }
+    if (request.method === 'GET' && pathname === '/api/fetch-image') {
+        const image = await fetchIkeaImage(requestUrl.searchParams.get('url'));
+        response.writeHead(200, {
+            'Content-Type': image.contentType,
+            'Cache-Control': 'private, max-age=300',
+            'X-Content-Type-Options': 'nosniff'
+        });
+        response.end(image.body);
         return;
     }
     if (request.method !== 'POST') {
@@ -204,9 +227,10 @@ async function handleApi(request, response, pathname) {
 const server = http.createServer(async (request, response) => {
     let pathname;
     try {
-        pathname = new URL(request.url, 'http://' + request.headers.host).pathname;
+        const requestUrl = new URL(request.url, 'http://' + request.headers.host);
+        pathname = requestUrl.pathname;
         if (pathname.indexOf('/api/') === 0) {
-            await handleApi(request, response, pathname);
+            await handleApi(request, response, requestUrl);
             return;
         }
         const file = STATIC_FILES[pathname];
