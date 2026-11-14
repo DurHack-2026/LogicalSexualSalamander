@@ -103,7 +103,7 @@ var SIZE_WORDS = [
 { re: /\bsingle\b/, w: 90, d: 195 }
 ];
 
-function extract(raw) {
+function createFurnitureFallback(raw) {
 var s = raw.trim();
 if (!s) return null;
 if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
@@ -205,6 +205,19 @@ if (Number.isFinite(product.price) && product.price >= 0 && (!product.priceCurre
     item.price = product.price; item.prov.price = 'link';
 }
 return item;
+}
+
+function isIkeaHostname(hostname) {
+var host = hostname.toLowerCase();
+return host === 'ikea.com' || /\.ikea\.com$/.test(host);
+}
+
+async function extract(raw, adapters) {
+var item = createFurnitureFallback(raw);
+if (!item) return null;
+if (!isIkeaHostname(new URL(item.url).hostname)) throw new Error('Roomfit currently accepts IKEA product links only.');
+var product = await window.RoomfitProductExtractor.extractFurnitureProduct(raw, adapters);
+return applyProductData(item, product);
 }
 
 /* =====================================================
@@ -568,8 +581,16 @@ return fetch(path, {
     headers: payload === undefined ? {} : { 'Content-Type': 'application/json' },
     body: payload === undefined ? undefined : JSON.stringify(payload)
 }).then(async function (response) {
-    var body = await response.json();
-    if (!response.ok) throw new Error(body.error || 'The extraction service returned an error.');
+    var responseText = await response.text();
+    var body;
+    try {
+        body = JSON.parse(responseText);
+    } catch (error) {
+        var preview = responseText.replace(/\s+/g, ' ').trim().slice(0, 120);
+        if (!response.ok) throw new Error('Extraction server returned HTTP ' + response.status + (preview ? ': ' + preview : '.'));
+        throw new Error('Extraction server returned a non-JSON response' + (preview ? ': ' + preview : '.'));
+    }
+    if (!response.ok) throw new Error(body.error || 'The extraction service returned HTTP ' + response.status + '.');
     return body;
 });
 }
@@ -584,8 +605,11 @@ var added = 0;
 var button = this;
 try {
     if (!window.RoomfitProductExtractor) throw new Error('Product extractor did not load. Reload the page and try again.');
+    if (window.location.protocol === 'file:') {
+        throw new Error('Roomfit is opened as a local file. Start server.js and open http://127.0.0.1:3000 to use product extraction.');
+    }
     var config = await apiRequest('/api/config');
-    if (!config.pageFetcherConfigured) throw new Error('Page fetching is not configured. Set ROOMFIT_PAGE_FETCH_URL in the server environment.');
+    if (!config.pageFetcherConfigured) throw new Error('The IKEA page fetcher is unavailable. Restart the Roomfit server and try again.');
     var adapters = {
         fetchPage: function (url) { return apiRequest('/api/fetch-page', { url: url }); },
         extractStructured: config.llmConfigured
@@ -596,10 +620,8 @@ try {
         var short = lines[i].replace(/^https?:\/\//, '').slice(0, 48);
         logLine('Reading ' + short + '…');
         try {
-            var it = extract(lines[i]);
+            var it = await extract(lines[i], adapters);
             if (!it) throw new Error('Enter a valid product URL.');
-            var product = await window.RoomfitProductExtractor.extractFurnitureProduct(lines[i], adapters);
-            it = applyProductData(it, product);
             var spot = freeSpot(it); it.x = spot[0]; it.y = spot[1];
             items.push(it); selId = it.id; added++;
             logLine('Added ' + it.name + ' · ' + Math.round(it.w) + '×' + Math.round(it.d) + '×' + Math.round(it.h) + ' cm · ' + it.material + ' · ' + gbp(it.price), 'ok');
