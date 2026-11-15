@@ -4,10 +4,33 @@ const http = require('node:http');
 const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+
+function loadEnvironmentFile() {
+    const envPath = path.join(__dirname, '.env');
+    if (!fsSync.existsSync(envPath)) return;
+
+    const contents = fsSync.readFileSync(envPath, 'utf8');
+    for (const line of contents.split(/\r?\n/)) {
+        const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+        if (!match || Object.prototype.hasOwnProperty.call(process.env, match[1])) continue;
+
+        let value = match[2];
+        if ((value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        process.env[match[1]] = value;
+    }
+}
+
+loadEnvironmentFile();
 
 const PORT = Number(process.env.ROOMFIT_PORT || 3000);
 const HOST = process.env.ROOMFIT_HOST || '127.0.0.1';
 const TRELLIS_PORT = Number(process.env.TRELLIS_PORT || 8766);
+const TRELLIS_API_URL = process.env.TRELLIS_API_URL || 'http://127.0.0.1:7861';
+const AUTO_START_TRELLIS = !['0', 'false', 'no', 'off'].includes(String(process.env.ROOMFIT_AUTOSTART_TRELLIS || '').toLowerCase());
 if (!Number.isInteger(TRELLIS_PORT) || TRELLIS_PORT < 1 || TRELLIS_PORT > 65535) {
     throw new Error('TRELLIS_PORT must be a valid TCP port.');
 }
@@ -32,6 +55,109 @@ const STATIC_FILES = {
 function sendJson(response, status, value) {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     response.end(JSON.stringify(value));
+}
+
+function startTrellisTunnel() {
+    const target = process.env.TRELLIS_SSH_TARGET;
+    if (!target) return;
+    if (!/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/.test(target)) {
+        console.error('TRELLIS_SSH_TARGET must use the user@host format.');
+        return;
+    }
+
+    const sshPort = Number(process.env.TRELLIS_SSH_PORT || 22);
+    const remoteApiPort = Number(process.env.TRELLIS_REMOTE_API_PORT || 7861);
+    const identityFile = process.env.TRELLIS_SSH_IDENTITY_FILE;
+    if (!Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535 ||
+        !Number.isInteger(remoteApiPort) || remoteApiPort < 1 || remoteApiPort > 65535) {
+        console.error('TRELLIS_SSH_PORT and TRELLIS_REMOTE_API_PORT must be valid TCP ports.');
+        return;
+    }
+
+    let localApiPort;
+    try {
+        const apiUrl = new URL(TRELLIS_API_URL);
+        if (apiUrl.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(apiUrl.hostname)) {
+            throw new Error('TRELLIS_API_URL must use a local HTTP address when an SSH tunnel is configured.');
+        }
+        localApiPort = Number(apiUrl.port || 7861);
+    } catch (error) {
+        console.error('Could not configure the TRELLIS SSH tunnel:', error.message);
+        return;
+    }
+
+    const child = spawn('ssh', [
+        '-N', '-T',
+        '-o', 'BatchMode=yes',
+        '-o', 'ExitOnForwardFailure=yes',
+        '-o', 'ServerAliveInterval=30',
+        '-o', 'ServerAliveCountMax=3',
+        '-p', String(sshPort),
+        '-L', '127.0.0.1:' + localApiPort + ':127.0.0.1:' + remoteApiPort,
+        ...(identityFile ? ['-i', identityFile] : []),
+        target
+    ], { cwd: __dirname, stdio: 'inherit', env: process.env });
+
+    child.on('error', error => {
+        console.error('Could not start the TRELLIS SSH tunnel:', error.message);
+    });
+    child.on('exit', (code, signal) => {
+        if (code === null) {
+            console.warn('TRELLIS SSH tunnel exited from signal:', signal);
+        } else if (code !== 0) {
+            console.warn('TRELLIS SSH tunnel exited with code ' + code + '. Check SSH access and the remote API.');
+        }
+    });
+    console.log('Starting TRELLIS SSH tunnel to ' + target + '.');
+}
+
+function startTrellisBridge() {
+    if (!AUTO_START_TRELLIS) return;
+
+    const commandCandidates = process.platform === 'win32'
+        ? ['py', 'python', 'python3']
+        : ['python3', 'python'];
+
+    let command = null;
+    let args = ['ai_server_trellis.py'];
+
+    for (const candidate of commandCandidates) {
+        const probe = spawnSync(candidate, ['--version'], { stdio: 'ignore' });
+        if (!probe.error && probe.status === 0) {
+            command = candidate;
+            if (candidate === 'py') {
+                args = ['-3', 'ai_server_trellis.py'];
+            }
+            break;
+        }
+    }
+
+    if (!command) {
+        console.warn('Skipping automatic TRELLIS startup because no Python executable was found.');
+        return;
+    }
+
+    const child = spawn(command, args, {
+        cwd: __dirname,
+        stdio: 'inherit',
+        env: Object.assign({}, process.env, { TRELLIS_API_URL }),
+    });
+
+    child.on('error', error => {
+        console.error('Could not start ai_server_trellis.py:', error.message);
+    });
+
+    child.on('exit', (code, signal) => {
+        if (code === null) {
+            console.warn('ai_server_trellis.py exited from signal:', signal);
+            return;
+        }
+        if (code !== 0) {
+            console.warn('ai_server_trellis.py exited with code ' + code + '. Check the local TRELLIS bridge and tunnel.');
+        }
+    });
+
+    console.log('Started ai_server_trellis.py automatically.');
 }
 
 async function readJson(request) {
@@ -329,6 +455,9 @@ async function handleApi(request, response, requestUrl) {
     }
     sendJson(response, 404, { error: 'API route not found.' });
 }
+
+startTrellisTunnel();
+startTrellisBridge();
 
 const server = http.createServer(async (request, response) => {
     let pathname;

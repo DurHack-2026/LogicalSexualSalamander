@@ -24,7 +24,7 @@ Open `http://127.0.0.1:3000`. The room starts empty; paste IKEA product URLs one
 
 The main Roomfit UI keeps the orbitable 3D room and room designer. Select an extracted furniture item and use **AI 3D model** to generate a GLB from its product image; generated models replace the item's procedural 3D shape, while its 2D placement and dimensions remain editable. Models can also be downloaded or reused from the saved-model list.
 
-Run `py -3 ai_server_trellis.py` in a second terminal alongside `node server.js`. The local TRELLIS bridge listens on port 8766 by default and forwards generation requests to `TRELLIS_API_URL` (default `http://127.0.0.1:7861`), so the TRELLIS GPU API or an SSH tunnel to it must also be running. Set `TRELLIS_PORT` if you need to change the bridge port; use the same value for both local servers. GitHub Pages cannot run these local services.
+Start `node server.js`; it launches the local TRELLIS bridge automatically via `ai_server_trellis.py` unless `ROOMFIT_AUTOSTART_TRELLIS=false` is set. For a remote GPU API, set `TRELLIS_SSH_TARGET=user@host` in `.env`; startup creates a tunnel from local `TRELLIS_API_URL` (default `http://127.0.0.1:7861`) to the remote `TRELLIS_REMOTE_API_PORT` (default `7861`). The remote TRELLIS API must already be running. SSH key authentication is required; set `TRELLIS_SSH_IDENTITY_FILE` if the key is not in the SSH client's default locations or agent. The SSH client may prompt to trust the host key. Set `TRELLIS_SSH_PORT` for a non-default SSH port. The bridge listens on port 8766 by default; set `TRELLIS_PORT` if needed. GitHub Pages cannot run these local services.
 
 ## GitHub Pages
 
