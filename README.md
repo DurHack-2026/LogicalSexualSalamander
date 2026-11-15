@@ -20,6 +20,12 @@ node server.js
 
 Open `http://127.0.0.1:3000`. The room starts empty; paste IKEA product URLs one per line and select **Extract details**. The server fetches IKEA product pages directly using standard HTTP requests and only follows redirects to IKEA domains. It does not attempt to bypass access restrictions; if IKEA returns an error such as HTTP 403, use a permitted access method or check the retailer's terms.
 
+## Generate furniture models
+
+The main Roomfit UI keeps the orbitable 3D room and room designer. Select an extracted furniture item and use **AI 3D model** to generate a GLB from its product image; generated models replace the item's procedural 3D shape, while its 2D placement and dimensions remain editable. Models can also be downloaded or reused from the saved-model list.
+
+Run `py -3 ai_server_trellis.py` in a second terminal alongside `node server.js`. The local TRELLIS bridge listens on port 8766 by default and forwards generation requests to `TRELLIS_API_URL` (default `http://127.0.0.1:7861`), so the TRELLIS GPU API or an SSH tunnel to it must also be running. Set `TRELLIS_PORT` if you need to change the bridge port; use the same value for both local servers. GitHub Pages cannot run these local services.
+
 ## GitHub Pages
 
 The static room editor and 2D/3D room views can be hosted on GitHub Pages. Pages serves `index.html`, which forwards to `Roomfit.html`. Product-link extraction is not available from Pages alone: it calls the `/api/` endpoints in `server.js`, and GitHub Pages cannot run that Node server. To enable extraction, deploy the API separately, update the frontend to call its URL, and configure the API's CORS policy; keep provider credentials on the server.

@@ -14,6 +14,17 @@ var roomPersistenceEnabled = false;
 var roomStorageRestoreFailed = false;
 var floorTextureTiles = Object.create(null);
 var floorThreeTextures = Object.create(null);
+var trellisState = {
+configured: false,
+statusLoaded: false,
+statusError: '',
+savedModels: [],
+savedModelsError: '',
+activeJob: null,
+generationErrors: Object.create(null),
+roomErrors: Object.create(null)
+};
+var threeModelCache = Object.create(null);
 
 /* ---------- helpers ---------- */
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -746,6 +757,7 @@ var b = $('#badges'); b.innerHTML = '';
     b.appendChild(s);
 });
 $('#edSrc').textContent = it.retailer + ' · ' + it.url;
+updateAIModelPanel(it);
 }
 function bindEditor() {
 function upd(fn) { return function () { var it = getSel(); if (!it) return; fn(it); edited(); }; }
@@ -762,6 +774,218 @@ $('#rotL').addEventListener('click', upd(function (it) { it.rot = (it.rot + 270)
 $('#rotR').addEventListener('click', upd(function (it) { it.rot = (it.rot + 90) % 360; E.rot.value = it.rot; $('#rotVal').textContent = it.rot + '°'; }));
 $('#delBtn').addEventListener('click', function () { var it = getSel(); if (it) removeItem(it.id); });
 }
+
+function isValidGeneratedModelUrl(value) {
+return typeof value === 'string' && /^\/generated_models\/[A-Za-z0-9-]{8,100}\.glb$/.test(value);
+}
+function readModelApiResponse(response) {
+return response.text().then(function (text) {
+    var data;
+    try { data = JSON.parse(text); }
+    catch (error) {
+        var preview = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+        throw new Error('TRELLIS returned an invalid response' + (preview ? ': ' + preview : '.'));
+    }
+    if (!response.ok) {
+        var failure = new Error(data.error || data.detail || 'TRELLIS returned HTTP ' + response.status + '.');
+        failure.status = response.status;
+        throw failure;
+    }
+    return data;
+});
+}
+function modelApiRequest(route, payload) {
+return fetch('/api/trellis/' + route, {
+    method: payload === undefined ? 'GET' : 'POST',
+    headers: payload === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload)
+}).then(readModelApiResponse);
+}
+function updateAIModelPanel(item) {
+var button = $('#generateModelButton');
+var status = $('#aiModelStatus');
+var download = $('#downloadModelLink');
+var select = $('#savedModelSelect');
+var job = item && trellisState.activeJob && trellisState.activeJob.itemId === item.id
+    ? trellisState.activeJob : null;
+var modelUrl = item && isValidGeneratedModelUrl(item.modelUrl) ? item.modelUrl : '';
+var roomError = item ? trellisState.roomErrors[item.id] : '';
+var generationError = item ? trellisState.generationErrors[item.id] : '';
+
+button.disabled = !item || !item.image || !trellisState.statusLoaded || !trellisState.configured ||
+    !!trellisState.statusError || !!trellisState.activeJob;
+button.textContent = modelUrl ? 'Generate another model' : 'Generate 3D model';
+$('#savedModelControls').hidden = !item || trellisState.savedModels.length === 0;
+$('#useSavedModelButton').disabled = !item || !select.value;
+download.hidden = !modelUrl;
+if (modelUrl) download.href = modelUrl;
+status.classList.remove('error-text');
+
+if (job) {
+    status.textContent = job.pollingError || (job.progress
+        ? 'Generating model… ' + job.progress + '%'
+        : 'Generating model… this can take a few minutes.');
+} else if (trellisState.activeJob) {
+    status.textContent = 'A model is generating for another item. Wait for it to finish.';
+} else if (modelUrl && roomError) {
+    status.textContent = 'Model is attached, but could not load in 3D: ' + roomError;
+    status.classList.add('error-text');
+} else if (modelUrl) {
+    status.textContent = 'Model attached. Open the 3D view to inspect it; drag there to orbit the room.';
+} else if (!trellisState.statusLoaded) {
+    status.textContent = 'Checking the TRELLIS GPU connection…';
+} else if (trellisState.statusError) {
+    status.textContent = trellisState.statusError;
+    status.classList.add('error-text');
+} else if (!trellisState.configured) {
+    status.textContent = 'Start the TRELLIS GPU API and local bridge, then reload this page.';
+} else if (!item || !item.image) {
+    status.textContent = 'This furniture item has no product image to send.';
+} else if (trellisState.savedModelsError) {
+    status.textContent = 'Could not load saved models: ' + trellisState.savedModelsError;
+    status.classList.add('error-text');
+} else if (generationError) {
+    status.textContent = generationError;
+    status.classList.add('error-text');
+} else {
+    status.textContent = 'Generate a model from this item’s product image.';
+}
+}
+function loadSavedModels() {
+return modelApiRequest('models').then(function (result) {
+    var select = $('#savedModelSelect');
+    var previous = select.value;
+    trellisState.savedModels = Array.isArray(result.models)
+        ? result.models.filter(function (model) {
+            return model && isValidGeneratedModelUrl(model.modelUrl);
+        })
+        : [];
+    select.innerHTML = '';
+    var placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a saved GLB…';
+    select.appendChild(placeholder);
+    trellisState.savedModels.forEach(function (model) {
+        var option = document.createElement('option');
+        option.value = model.modelUrl;
+        option.textContent = (Number.isFinite(model.createdAt)
+            ? new Date(model.createdAt).toLocaleString()
+            : 'Saved model') + (Number.isFinite(model.sizeBytes)
+            ? ' · ' + (model.sizeBytes / (1024 * 1024)).toFixed(1) + ' MB'
+            : '');
+        select.appendChild(option);
+    });
+    select.value = trellisState.savedModels.some(function (model) {
+        return model.modelUrl === previous;
+    }) ? previous : '';
+    trellisState.savedModelsError = '';
+}).catch(function (error) {
+    trellisState.savedModels = [];
+    trellisState.savedModelsError = error.message || 'Could not load saved models.';
+}).then(function () {
+    updateAIModelPanel(getSel());
+});
+}
+function checkTrellisStatus() {
+if (window.location.protocol === 'file:') {
+    trellisState.statusError = 'Open Roomfit through `node server.js` to use the TRELLIS model API.';
+    trellisState.statusLoaded = true;
+    updateAIModelPanel(getSel());
+    return;
+}
+modelApiRequest('status').then(function (result) {
+    trellisState.configured = result.configured === true;
+}).catch(function (error) {
+    trellisState.statusError = error.message || 'Could not connect to the TRELLIS service.';
+}).then(function () {
+    trellisState.statusLoaded = true;
+    updateAIModelPanel(getSel());
+});
+}
+function waitForModelPoll() {
+return new Promise(function (resolve) { window.setTimeout(resolve, 5000); });
+}
+function pollModelTask(taskId, job, attempt, consecutiveFailures) {
+if (attempt >= 360) return Promise.reject(new Error('TRELLIS generation is taking longer than expected. Check that the GPU server is still running.'));
+return waitForModelPoll().then(function () {
+    return modelApiRequest('tasks/' + encodeURIComponent(taskId));
+}).then(function (task) {
+    var taskStatus = typeof task.status === 'string' ? task.status.toUpperCase() : '';
+    job.pollingError = '';
+    job.progress = Number.isFinite(Number(task.progress)) ? Number(task.progress) : 0;
+    updateAIModelPanel(getSel());
+    if (taskStatus === 'SUCCEEDED') {
+        if (!isValidGeneratedModelUrl(task.modelUrl)) throw new Error('TRELLIS completed without a valid generated model URL.');
+        return task;
+    }
+    if (taskStatus === 'FAILED') throw new Error(task.error || 'TRELLIS could not generate a model from this image.');
+    if (taskStatus && taskStatus !== 'PENDING' && taskStatus !== 'IN_PROGRESS') {
+        throw new Error('TRELLIS returned an unexpected task status: ' + taskStatus + '.');
+    }
+    return pollModelTask(taskId, job, attempt + 1, 0);
+}).catch(function (error) {
+    if ((error.name === 'TypeError' || error.status >= 500) && consecutiveFailures < 3) {
+        job.pollingError = 'Connection to TRELLIS was interrupted. Retrying (' + (consecutiveFailures + 1) + '/4)…';
+        updateAIModelPanel(getSel());
+        return pollModelTask(taskId, job, attempt + 1, consecutiveFailures + 1);
+    }
+    if (error.name === 'TypeError' || error.status >= 500) {
+        throw new Error('Could not reconnect to TRELLIS after four attempts: ' + error.message);
+    }
+    throw error;
+});
+}
+function generateSelectedModel() {
+var item = getSel();
+if (!item || !item.image || trellisState.activeJob || !trellisState.configured) return;
+var job = { itemId: item.id, progress: 0, pollingError: '' };
+trellisState.activeJob = job;
+delete trellisState.generationErrors[item.id];
+updateAIModelPanel(item);
+modelApiRequest('generate', { imageUrl: item.image }).then(function (created) {
+    if (typeof created.taskId !== 'string' || !/^[A-Za-z0-9-]{8,100}$/.test(created.taskId)) {
+        throw new Error('TRELLIS did not return a valid generation task.');
+    }
+    return pollModelTask(created.taskId, job, 0, 0);
+}).then(function (task) {
+    var currentItem = null;
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].id === job.itemId) { currentItem = items[i]; break; }
+    }
+    if (!currentItem) {
+        loadSavedModels();
+        return;
+    }
+    currentItem.modelUrl = task.modelUrl;
+    delete trellisState.generationErrors[item.id];
+    delete trellisState.roomErrors[item.id];
+    loadSavedModels();
+    edited();
+    fillEditor();
+}).catch(function (error) {
+    trellisState.generationErrors[item.id] = error.message || '3D model generation failed.';
+    if (selId === item.id) updateAIModelPanel(getSel());
+}).then(function () {
+    if (trellisState.activeJob === job) trellisState.activeJob = null;
+    updateAIModelPanel(getSel());
+});
+}
+function useSavedModelInRoom() {
+var item = getSel(), selectedUrl = $('#savedModelSelect').value;
+if (!item || !isValidGeneratedModelUrl(selectedUrl) ||
+    !trellisState.savedModels.some(function (model) { return model.modelUrl === selectedUrl; })) return;
+item.modelUrl = selectedUrl;
+delete trellisState.generationErrors[item.id];
+delete trellisState.roomErrors[item.id];
+edited();
+fillEditor();
+}
+$('#generateModelButton').addEventListener('click', generateSelectedModel);
+$('#savedModelSelect').addEventListener('change', function () { updateAIModelPanel(getSel()); });
+$('#useSavedModelButton').addEventListener('click', useSavedModelInRoom);
+checkTrellisStatus();
+loadSavedModels();
+
 function removeItem(id) {
 items = items.filter(function (i) { return i.id !== id; });
 if (selId === id) selId = null;
@@ -1154,6 +1378,11 @@ if (value.image) {
         return null;
     }
 }
+var modelUrl = null;
+if (value.modelUrl !== undefined && value.modelUrl !== null) {
+    if (!isValidGeneratedModelUrl(value.modelUrl)) return null;
+    modelUrl = value.modelUrl;
+}
 var provenance = value.prov && typeof value.prov === 'object' ? value.prov : {};
 function source(field) { return provenance[field] === 'link' ? 'link' : 'estimated'; }
 return {
@@ -1173,6 +1402,7 @@ return {
     url: url.href,
     retailer: typeof value.retailer === 'string' ? value.retailer.slice(0, 100) : cap(url.hostname.split('.')[0]),
     image: image,
+    modelUrl: modelUrl,
     prov: { size: source('size'), colour: source('colour'), material: source('material'), price: source('price') }
 };
 }
@@ -1261,7 +1491,7 @@ $('#resetBtn').addEventListener('click', resetRoom);
 /* =====================================================
     3D view (three.js)
     ===================================================== */
-var T = { ready: false, groups: {}, root: null, ceilingLight: null };
+var T = { ready: false, groups: {}, root: null, ceilingLight: null, loader: null };
 var orbit = { az: 0.75, pol: 1.0, dist: 700 };
 function box3(g, w, h, d, x, y, z, color) {
 var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color: color }));
@@ -1347,10 +1577,93 @@ if (cat === 'sofa' || cat === 'armchair') {
 else { box3(g, w, h, d, 0, 0, 0, col); }
 return g;
 }
+function dispose3DObject(object) {
+object.traverse(function (node) {
+    if (node.userData && node.userData.sharedModel) return;
+    if (node.geometry) node.geometry.dispose();
+    if (node.material) {
+        var materials = Array.isArray(node.material) ? node.material : [node.material];
+        materials.forEach(function (material) {
+            if (material.map) material.map.dispose();
+            material.dispose();
+        });
+    }
+});
+}
+function loadFurniture3DModel(item, group) {
+var url = item.modelUrl;
+if (!isValidGeneratedModelUrl(url)) return;
+if (!T.loader) {
+    trellisState.roomErrors[item.id] = 'The GLB loader did not load. Check the connection and reload.';
+    if (selId === item.id) updateAIModelPanel(getSel());
+    return;
+}
+if (!threeModelCache[url]) {
+    threeModelCache[url] = new Promise(function (resolve, reject) {
+        T.loader.load(url, resolve, undefined, reject);
+    }).catch(function (error) {
+        delete threeModelCache[url];
+        throw error;
+    });
+}
+threeModelCache[url].then(function (gltf) {
+    var currentItem = null;
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].id === item.id) { currentItem = items[i]; break; }
+    }
+    if (T.groups[item.id] !== group || !currentItem || currentItem.modelUrl !== url) return;
+
+    var model = gltf.scene.clone(true);
+    var bounds = new THREE.Box3().setFromObject(model);
+    var size = bounds.getSize(new THREE.Vector3());
+    if (![size.x, size.y, size.z].every(function (value) {
+        return Number.isFinite(value) && value > 1e-5;
+    })) throw new Error('The generated GLB has no usable 3D geometry.');
+    var center = bounds.getCenter(new THREE.Vector3());
+    var targetAspect = item.w / item.d;
+    var modelAspect = size.x / size.z;
+    var rotateToFit = Math.abs(Math.log((size.z / size.x) / targetAspect)) <
+        Math.abs(Math.log(modelAspect / targetAspect));
+    var centeredModel = new THREE.Group();
+    centeredModel.position.set(-center.x, -bounds.min.y, -center.z);
+    centeredModel.add(model);
+    var orientedModel = new THREE.Group();
+    orientedModel.rotation.y = rotateToFit ? Math.PI / 2 : 0;
+    orientedModel.add(centeredModel);
+    var orientedBounds = new THREE.Box3().setFromObject(orientedModel);
+    var orientedSize = orientedBounds.getSize(new THREE.Vector3());
+    var fitRoot = new THREE.Group();
+    fitRoot.scale.set(item.w / orientedSize.x, item.h / orientedSize.y, item.d / orientedSize.z);
+    fitRoot.add(orientedModel);
+    var modelRoot = new THREE.Group();
+    modelRoot.add(fitRoot);
+    modelRoot.traverse(function (node) {
+        node.userData = node.userData || {};
+        node.userData.sharedModel = true;
+        if (node.isMesh) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+        }
+    });
+    clearGroup(group);
+    group.add(modelRoot);
+    delete trellisState.roomErrors[item.id];
+    render3D();
+    if (selId === item.id) updateAIModelPanel(getSel());
+}).catch(function (error) {
+    var currentItem = null;
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].id === item.id) { currentItem = items[i]; break; }
+    }
+    if (T.groups[item.id] !== group || !currentItem || currentItem.modelUrl !== url) return;
+    trellisState.roomErrors[item.id] = error.message || 'The generated GLB could not be loaded.';
+    if (selId === item.id) updateAIModelPanel(getSel());
+});
+}
 function clearGroup(g) {
 while (g.children.length) {
     var c = g.children[0]; g.remove(c);
-    c.traverse(function (o) { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    dispose3DObject(c);
 }
 }
 function init3D() {
@@ -1361,6 +1674,7 @@ T.renderer = new THREE.WebGLRenderer({ antialias: true });
 T.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 T.renderer.shadowMap.enabled = true;
 T.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+T.loader = window.THREE.GLTFLoader ? new THREE.GLTFLoader() : null;
 el.appendChild(T.renderer.domElement);
 T.scene = new THREE.Scene();
 T.camera = new THREE.PerspectiveCamera(45, 1, 5, 6000);
@@ -1514,7 +1828,12 @@ detectedWindows.forEach(function (windowItem) {
     T.roomG.add(glassGroup);
 });
 /* furniture */
-items.forEach(function (it) { var g = build3DItem(it); T.itemsG.add(g); T.groups[it.id] = g; });
+items.forEach(function (it) {
+    var g = build3DItem(it);
+    T.itemsG.add(g);
+    T.groups[it.id] = g;
+    if (it.modelUrl) loadFurniture3DModel(it, g);
+});
 orbit.dist = clamp(Math.max(room.w, room.l) * 1.5, 450, 2200);
 sync3D(true);
 }
