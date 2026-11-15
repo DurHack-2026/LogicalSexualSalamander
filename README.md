@@ -3,7 +3,7 @@
 Website where users enter links to furniture items as well as the dimensions of the room.
 The AI will get the dimensions, shape, price, materials, colour from the links.
 The user can then move the furniture about in a virtual room to see how it fits and if they like it.
-Room settings also let users enter a hex wall colour and toggle transparent walls in the 3D view.
+Room settings also let users enter a hex wall colour, toggle transparent walls in the 3D view, and choose a wood, carpet, or marble floor texture.
 
 Tasks:
 - Generating the virtual room
@@ -19,6 +19,12 @@ node server.js
 ```
 
 Open `http://127.0.0.1:3000`. The room starts empty; paste IKEA product URLs one per line and select **Extract details**. The server fetches IKEA product pages directly using standard HTTP requests and only follows redirects to IKEA domains. It does not attempt to bypass access restrictions; if IKEA returns an error such as HTTP 403, use a permitted access method or check the retailer's terms.
+
+## GitHub Pages
+
+The static room editor and 2D/3D room views can be hosted on GitHub Pages. Pages serves `index.html`, which forwards to `Roomfit.html`. Product-link extraction is not available from Pages alone: it calls the `/api/` endpoints in `server.js`, and GitHub Pages cannot run that Node server. To enable extraction, deploy the API separately, update the frontend to call its URL, and configure the API's CORS policy; keep provider credentials on the server.
+
+Select **Design room shape** to open the manual editor. Drag room corners, add or remove corners to draw an outline, and click a wall to add a door or window. Set room dimensions, door width, hinge side, and swing direction; windows have editable width, sill height, and glass height. Roomfit renders windows as lightly tinted transparent glass and retains the wall above and below each opening.
 
 `product-extractor.js` reads JSON-LD, product specifications, accordion text, and IKEA image candidates from the returned HTML. The optional LLM endpoint can help recover specifications not found by these parsers. To configure one, copy `.env.example` to `.env` and set:
 

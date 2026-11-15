@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Design a room · Roomfit</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Design your room</h1>
+    <p>Draw the room by moving its corners. Add corners for any outline, then click a wall to place a door or window.</p>
+    <a class="btn small" href="Roomfit.html">Back to room</a>
+  </header>
+
+  <main class="app">
+    <div class="rail">
+      <section class="panel" aria-labelledby="h-room-outline">
+        <h2 id="h-room-outline">Room outline</h2>
+        <p class="hint">Drag a corner to reshape the room. Select a corner to remove it, or add one by clicking a wall.</p>
+        <div class="btns">
+          <button class="btn" id="addCorner" type="button">Add corner</button>
+          <button class="btn danger" id="removeCorner" type="button">Remove selected corner</button>
+          <button class="btn" id="resetShape" type="button">Reset room shape</button>
+        </div>
+        <div id="cornerList" class="editor-list" aria-label="Room corners"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-room-doors">
+        <h2 id="h-room-doors">Doors</h2>
+        <p class="hint">Set a door width, choose <strong>Add door</strong>, then click a wall. Select a door to change its width, hinge, or swing.</p>
+        <label for="doorWidth">Door width (cm)</label>
+        <input type="number" id="doorWidth" min="60" max="140" step="5" value="90">
+        <div class="btns">
+          <button class="btn" id="addDoor" type="button">Add door</button>
+          <button class="btn danger" id="removeDoor" type="button" disabled>Remove selected door</button>
+        </div>
+        <div class="btns">
+          <button class="btn" id="flipHinge" type="button" disabled>Flip hinge side</button>
+          <button class="btn" id="flipSwing" type="button" disabled>Flip swing direction</button>
+        </div>
+        <div id="doorList" class="editor-list" aria-label="Room doors"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-room-windows">
+        <h2 id="h-room-windows">Windows</h2>
+        <p class="hint">Set the window width, sill height, and glass height. Choose <strong>Add window</strong>, then click a wall.</p>
+        <div class="row two">
+          <div><label for="windowWidth">Width (cm)</label><input type="number" id="windowWidth" min="60" max="240" step="10" value="120"></div>
+          <div><label for="windowSill">Sill height (cm)</label><input type="number" id="windowSill" min="0" max="250" step="5" value="90"></div>
+          <div><label for="windowHeight">Glass height (cm)</label><input type="number" id="windowHeight" min="40" max="240" step="5" value="110"></div>
+        </div>
+        <div class="btns">
+          <button class="btn" id="addWindow" type="button">Add window</button>
+          <button class="btn danger" id="removeWindow" type="button" disabled>Remove selected window</button>
+        </div>
+        <div id="windowList" class="editor-list" aria-label="Room windows"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-editor-help">
+        <h2 id="h-editor-help">Editing tips</h2>
+        <p class="hint">Corners are joined in order. Keep the outline closed and non-crossing. Doors and windows stay attached to their wall when you reshape the room.</p>
+        <p class="hint" id="editorStatus" role="status" aria-live="polite">Drag a corner, add a corner, or add a door to begin.</p>
+      </section>
+    </div>
+
+    <div class="stage-col">
+      <section class="panel" aria-labelledby="h-room-measurements">
+        <h2 id="h-room-measurements">Room measurements</h2>
+        <p class="hint">Enter the actual room size and ceiling height so Roomfit can scale the drawing.</p>
+        <div class="row">
+          <div><label for="roomWidth">Width (cm)</label><input type="number" id="roomWidth" min="200" max="1200" step="10" value="420"></div>
+          <div><label for="roomLength">Length (cm)</label><input type="number" id="roomLength" min="200" max="1200" step="10" value="360"></div>
+          <div><label for="roomHeight">Ceiling height (cm)</label><input type="number" id="roomHeight" min="200" max="400" step="5" value="250"></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-room-editor">
+        <h2 id="h-room-editor">Room editor</h2>
+        <p class="hint">Select and drag the circular handles. Use the buttons to add a corner, door, or window on a wall.</p>
+        <div class="canvas-box floorplan-editor">
+          <svg id="roomEditor" viewBox="0 0 800 520" role="application" aria-label="Interactive room outline editor">
+            <defs>
+              <pattern id="editorGrid" width="24" height="24" patternUnits="userSpaceOnUse">
+                <path d="M 24 0 L 0 0 0 24" fill="none" class="editor-grid-line"></path>
+              </pattern>
+            </defs>
+            <rect x="0" y="0" width="800" height="520" class="editor-grid"></rect>
+            <g id="roomDrawing"></g>
+          </svg>
+        </div>
+        <button class="btn primary" id="applyRoom" type="button">Use this room in Roomfit</button>
+      </section>
+    </div>
+  </main>
+</div>
+<script src="floorplan.js"></script>
+</body>
+</html>

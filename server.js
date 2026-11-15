@@ -14,8 +14,12 @@ const STATIC_FILES = {
     '/': ['Roomfit.html', 'text/html; charset=utf-8'],
     '/roomfit.html': ['Roomfit.html', 'text/html; charset=utf-8'],
     '/Roomfit.html': ['Roomfit.html', 'text/html; charset=utf-8'],
+    '/floorplan.html': ['floorplan.html', 'text/html; charset=utf-8'],
+    '/Floorplan.html': ['floorplan.html', 'text/html; charset=utf-8'],
     '/style.css': ['style.css', 'text/css; charset=utf-8'],
     '/roomfit.js': ['roomfit.js', 'text/javascript; charset=utf-8'],
+    '/floorplan.js': ['floorplan.js', 'text/javascript; charset=utf-8'],
+    '/ai_studio_code.js': ['ai_studio_code.js', 'text/javascript; charset=utf-8'],
     '/product-extractor.js': ['product-extractor.js', 'text/javascript; charset=utf-8']
 };
 
