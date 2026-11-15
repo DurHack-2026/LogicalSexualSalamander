@@ -10,6 +10,8 @@ var room = { shape: 'rect', customPoly: null, customDoors: [], customWindows: []
 var items = [];
 var selId = null;
 var uid = 1;
+var roomPersistenceEnabled = false;
+var roomStorageRestoreFailed = false;
 var floorTextureTiles = Object.create(null);
 var floorThreeTextures = Object.create(null);
 
@@ -114,9 +116,11 @@ if (r.shape === 'L') {
     var top = Math.round(w - w * 0.4), c = top / 2, half = Math.min(70, top / 2 - 20);
     win = { x0: c - half, x1: c + half, y: 0 };
 } else if (r.shape === 'bay') {
-    win = { x0: w * 0.4, x1: w * 0.6, y: 0 };
+    var bayWindowWidth = Math.min(240, w / 2, Math.max(60, w * 0.2));
+    win = { x0: (w - bayWindowWidth) / 2, x1: (w + bayWindowWidth) / 2, y: 0 };
 } else {
-    win = { x0: w * 0.25, x1: w * 0.75, y: 0 };
+    var halfWindow = Math.min(120, w / 4);
+    win = { x0: w / 2 - halfWindow, x1: w / 2 + halfWindow, y: 0 };
 }
 return { door: door, win: win };
 }
@@ -198,6 +202,27 @@ return {
 function customWindowGeometries(poly) {
 return (room.customWindows || []).map(function (windowItem) { return customWindowGeometry(windowItem, poly); })
     .filter(function (windowItem) { return !!windowItem; });
+}
+function roomDoorGeometries(poly) {
+if (room.shape === 'custom') return customDoorGeometries(poly);
+var preset = roomOpenings(room).door;
+var opening = segmentInterval(poly, [preset.x0, preset.y], [preset.x1, preset.y]);
+if (!opening) return [];
+return [customDoorGeometry(Object.assign(opening, {
+    hingeAtStart: false,
+    swingInward: true
+}), poly)].filter(function (door) { return !!door; });
+}
+function roomWindowGeometries(poly) {
+if (room.shape === 'custom') return customWindowGeometries(poly);
+var preset = roomOpenings(room).win;
+var opening = segmentInterval(poly, [preset.x0, preset.y], [preset.x1, preset.y]);
+if (!opening) return [];
+var sillHeightCm = 95;
+return [customWindowGeometry(Object.assign(opening, {
+    sillHeightCm: sillHeightCm,
+    heightCm: Math.min(110, room.h - sillHeightCm)
+}), poly)].filter(function (windowItem) { return !!windowItem; });
 }
 
 /* =====================================================
@@ -481,7 +506,7 @@ else if (it.shape === 'L') {
 } else { ctx.rect(-hw, -hd, hw * 2, hd * 2); }
 }
 function drawPlan() {
-var poly = roomPoly(room), op = roomOpenings(room), iss = computeIssues();
+var poly = roomPoly(room), iss = computeIssues();
 ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
 ctx.clearRect(0, 0, V.W, V.H);
 ctx.fillStyle = cssv('--surface'); ctx.fillRect(0, 0, V.W, V.H);
@@ -500,55 +525,42 @@ ctx.restore(); ctx.globalAlpha = 1;
 ctx.beginPath(); poly.forEach(function (p, i) { i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1])); }); ctx.closePath();
 ctx.strokeStyle = room.wallColor; ctx.lineWidth = 6; ctx.lineJoin = 'miter'; ctx.stroke();
 
-if (room.shape !== 'custom') {
-/* window */
-ctx.strokeStyle = cssv('--accent'); ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(sx(op.win.x0), sy(op.win.y)); ctx.lineTo(sx(op.win.x1), sy(op.win.y)); ctx.stroke();
-ctx.strokeStyle = cssv('--floor'); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx(op.win.x0), sy(op.win.y)); ctx.lineTo(sx(op.win.x1), sy(op.win.y)); ctx.stroke();
-
-/* door gap and swing */
-var dw = op.door.x1 - op.door.x0;
-ctx.strokeStyle = cssv('--floor'); ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(sx(op.door.x0), sy(op.door.y)); ctx.lineTo(sx(op.door.x1), sy(op.door.y)); ctx.stroke();
-ctx.strokeStyle = cssv('--muted'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-ctx.beginPath(); ctx.arc(sx(op.door.x0), sy(op.door.y), dw * V.sc, -Math.PI / 2, 0); ctx.stroke(); ctx.setLineDash([]);
-ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx(op.door.x0), sy(op.door.y)); ctx.lineTo(sx(op.door.x0), sy(op.door.y - dw)); ctx.stroke();
-} else {
-    var detectedDoors = customDoorGeometries(poly);
+var detectedDoors = roomDoorGeometries(poly);
+ctx.strokeStyle = ctx.createPattern(getFloorTextureTile(room.floorTexture), 'repeat') || cssv('--floor');
+ctx.lineWidth = 8;
+detectedDoors.forEach(function (door) {
+    ctx.beginPath(); ctx.moveTo(sx(door.start[0]), sy(door.start[1])); ctx.lineTo(sx(door.end[0]), sy(door.end[1])); ctx.stroke();
+    ctx.strokeStyle = cssv('--muted'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    door.arc.forEach(function (point, index) { index ? ctx.lineTo(sx(point[0]), sy(point[1])) : ctx.moveTo(sx(point[0]), sy(point[1])); });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx(door.hinge[0]), sy(door.hinge[1]));
+    ctx.lineTo(sx(door.swingEnd[0]), sy(door.swingEnd[1])); ctx.stroke();
     ctx.strokeStyle = ctx.createPattern(getFloorTextureTile(room.floorTexture), 'repeat') || cssv('--floor');
     ctx.lineWidth = 8;
-    detectedDoors.forEach(function (door) {
-        ctx.beginPath(); ctx.moveTo(sx(door.start[0]), sy(door.start[1])); ctx.lineTo(sx(door.end[0]), sy(door.end[1])); ctx.stroke();
-        ctx.strokeStyle = cssv('--muted'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        door.arc.forEach(function (point, index) { index ? ctx.lineTo(sx(point[0]), sy(point[1])) : ctx.moveTo(sx(point[0]), sy(point[1])); });
-        ctx.stroke(); ctx.setLineDash([]);
-        ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx(door.hinge[0]), sy(door.hinge[1]));
-        ctx.lineTo(sx(door.swingEnd[0]), sy(door.swingEnd[1])); ctx.stroke();
-        ctx.strokeStyle = ctx.createPattern(getFloorTextureTile(room.floorTexture), 'repeat') || cssv('--floor');
-        ctx.lineWidth = 8;
-    });
-    var detectedWindows = customWindowGeometries(poly);
-    detectedWindows.forEach(function (windowItem) {
-        var a = poly[windowItem.edgeIndex], b = poly[(windowItem.edgeIndex + 1) % poly.length];
-        var dx = b[0] - a[0], dy = b[1] - a[1], edgeLength = Math.hypot(dx, dy) || 1;
-        var inward = polyArea(poly) >= 0 ? [-dy / edgeLength, dx / edgeLength] : [dy / edgeLength, -dx / edgeLength];
-        var offset = 3;
-        ctx.strokeStyle = ctx.createPattern(getFloorTextureTile(room.floorTexture), 'repeat') || cssv('--floor');
-        ctx.lineWidth = 8; ctx.beginPath();
-        ctx.moveTo(sx(windowItem.start[0]), sy(windowItem.start[1]));
-        ctx.lineTo(sx(windowItem.end[0]), sy(windowItem.end[1]));
-        ctx.stroke();
-        ctx.strokeStyle = 'rgba(112, 203, 218, 0.3)'; ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.moveTo(sx(windowItem.start[0]), sy(windowItem.start[1]));
-        ctx.lineTo(sx(windowItem.end[0]), sy(windowItem.end[1]));
-        ctx.stroke();
-        ctx.strokeStyle = 'rgba(130, 205, 217, 0.85)'; ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(sx(windowItem.start[0] + inward[0] * offset), sy(windowItem.start[1] + inward[1] * offset));
-        ctx.lineTo(sx(windowItem.end[0] + inward[0] * offset), sy(windowItem.end[1] + inward[1] * offset));
-        ctx.stroke();
-    });
-}
+});
+var detectedWindows = roomWindowGeometries(poly);
+detectedWindows.forEach(function (windowItem) {
+    var a = poly[windowItem.edgeIndex], b = poly[(windowItem.edgeIndex + 1) % poly.length];
+    var dx = b[0] - a[0], dy = b[1] - a[1], edgeLength = Math.hypot(dx, dy) || 1;
+    var inward = polyArea(poly) >= 0 ? [-dy / edgeLength, dx / edgeLength] : [dy / edgeLength, -dx / edgeLength];
+    var offset = 3;
+    ctx.strokeStyle = ctx.createPattern(getFloorTextureTile(room.floorTexture), 'repeat') || cssv('--floor');
+    ctx.lineWidth = 8; ctx.beginPath();
+    ctx.moveTo(sx(windowItem.start[0]), sy(windowItem.start[1]));
+    ctx.lineTo(sx(windowItem.end[0]), sy(windowItem.end[1]));
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(112, 203, 218, 0.3)'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(sx(windowItem.start[0]), sy(windowItem.start[1]));
+    ctx.lineTo(sx(windowItem.end[0]), sy(windowItem.end[1]));
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(130, 205, 217, 0.85)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx(windowItem.start[0] + inward[0] * offset), sy(windowItem.start[1] + inward[1] * offset));
+    ctx.lineTo(sx(windowItem.end[0] + inward[0] * offset), sy(windowItem.end[1] + inward[1] * offset));
+    ctx.stroke();
+});
 
 /* dimension labels */
 ctx.fillStyle = cssv('--muted'); ctx.font = '500 12px ' + cssv('--font-mono'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -764,7 +776,7 @@ function edited() { renderList(); drawPlan(); updateStats(); rebuild3D(); }
 function roomChanged() {
 var area = polyArea(roomPoly(room)) / 10000;
 $('#roomSummary').textContent = (room.w / 100).toFixed(1) + ' × ' + (room.l / 100).toFixed(1) + ' m, ' + (room.h / 100).toFixed(2) + ' m ceiling · ' + area.toFixed(1) + ' m² of floor';
-sizePlan(); edited();
+sizePlan(); edited(); persistRoomConfig();
 }
 
 /* ---------- room form ---------- */
@@ -785,15 +797,18 @@ if (!valid) return;
 room.wallColor = value.toUpperCase();
 drawPlan();
 if (T.ready) rebuild3D();
+persistRoomConfig();
 }
 function readWallTransparency() {
 room.transparentWalls = $('#transparentWalls').checked;
 if (T.ready) rebuild3D();
+persistRoomConfig();
 }
 function readFloorTexture() {
 room.floorTexture = $('#floorTexture').value;
 drawPlan();
 if (T.ready) rebuild3D();
+persistRoomConfig();
 }
 ['#rw', '#rl', '#rh'].forEach(function (s) { $(s).addEventListener('input', readRoom); });
 document.querySelectorAll('input[name=shape]').forEach(function (r) { r.addEventListener('change', readRoom); });
@@ -895,7 +910,7 @@ var params = new URLSearchParams(window.location.search);
 var width = Number(params.get('roomWidth')), length = Number(params.get('roomLength'));
 var height = Number(params.get('roomHeight'));
 if (!(width >= 200 && width <= 1200 && length >= 200 && length <= 1200 &&
-    height >= 200 && height <= 400)) return;
+    height >= 200 && height <= 400)) return false;
 var requestedShape = params.get('roomShape');
 var customPoly = requestedShape === 'custom' ? parseImportedPolygon(params.get('roomPoly')) : null;
 var invalidCustomPoly = requestedShape === 'custom' && !customPoly;
@@ -923,6 +938,7 @@ roomChanged();
 if (invalidCustomPoly) $('#roomSummary').textContent += ' · the imported outline was invalid; using a rectangle instead.';
 if (invalidDoorData) $('#roomSummary').textContent += ' · detected door data was invalid and has been ignored.';
 if (invalidWindowData) $('#roomSummary').textContent += ' · window data was invalid and has been ignored.';
+return true;
 }
 function parseImportedPolygon(value) {
 if (typeof value !== 'string' || value.length > 12000) return null;
@@ -985,6 +1001,274 @@ for (var i = 0; i < windows.length; i++) {
 }
 return windows;
 }
+function segmentInterval(poly, start, end) {
+for (var edgeIndex = 0; edgeIndex < poly.length; edgeIndex++) {
+    var a = poly[edgeIndex], b = poly[(edgeIndex + 1) % poly.length];
+    var dx = b[0] - a[0], dy = b[1] - a[1], lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared < 1) continue;
+    var startT = ((start[0] - a[0]) * dx + (start[1] - a[1]) * dy) / lengthSquared;
+    var endT = ((end[0] - a[0]) * dx + (end[1] - a[1]) * dy) / lengthSquared;
+    var startX = a[0] + dx * startT, startY = a[1] + dy * startT;
+    var endX = a[0] + dx * endT, endY = a[1] + dy * endT;
+    var tolerance = 1.5;
+    if (Math.hypot(startX - start[0], startY - start[1]) > tolerance ||
+        Math.hypot(endX - end[0], endY - end[1]) > tolerance ||
+        startT < 0 || startT > 1 || endT < 0 || endT > 1) continue;
+    return { edgeIndex: edgeIndex, t0: Math.min(startT, endT), t1: Math.max(startT, endT) };
+}
+return null;
+}
+function roomConfigSnapshot() {
+var polygonCm = roomPoly(room);
+var polygon = polygonCm.map(function (point) { return [point[0] / room.w, point[1] / room.l]; });
+var doors = room.shape === 'custom' ? room.customDoors : [];
+var windows = room.shape === 'custom' ? room.customWindows : [];
+if (room.shape !== 'custom') {
+    var preset = roomOpenings(room);
+    var door = segmentInterval(polygonCm, [preset.door.x0, preset.door.y], [preset.door.x1, preset.door.y]);
+    var windowOpening = segmentInterval(polygonCm, [preset.win.x0, preset.win.y], [preset.win.x1, preset.win.y]);
+    if (door) doors = [Object.assign(door, { hingeAtStart: false, swingInward: true, confidence: 1 })];
+    if (windowOpening) windows = [Object.assign(windowOpening, {
+        sillHeightCm: 95,
+        heightCm: Math.min(110, room.h - 95),
+        confidence: 1
+    })];
+}
+return {
+    version: 1,
+    shape: room.shape,
+    widthCm: room.w,
+    lengthCm: room.l,
+    heightCm: room.h,
+    polygon: polygon,
+    doors: doors,
+    windows: windows,
+    wallColor: room.wallColor,
+    transparentWalls: room.transparentWalls,
+    floorTexture: room.floorTexture
+};
+}
+function validatedRoomConfig(value) {
+if (!value || typeof value !== 'object' || value.version !== 1 ||
+    ['rect', 'L', 'bay', 'custom'].indexOf(value.shape) < 0 ||
+    !Number.isFinite(value.widthCm) || value.widthCm < 200 || value.widthCm > 1200 ||
+    !Number.isFinite(value.lengthCm) || value.lengthCm < 200 || value.lengthCm > 1200 ||
+    !Number.isFinite(value.heightCm) || value.heightCm < 200 || value.heightCm > 400 ||
+    !/^#[0-9a-f]{6}$/i.test(value.wallColor) ||
+    typeof value.transparentWalls !== 'boolean' ||
+    ['wood', 'carpet', 'marble'].indexOf(value.floorTexture) < 0 ||
+    !Array.isArray(value.doors) || !Array.isArray(value.windows)) return null;
+var polygon = parseImportedPolygon(JSON.stringify(value.polygon));
+if (!polygon) return null;
+var doors = parseImportedDoors(JSON.stringify(value.doors), polygon);
+var windows = parseImportedWindows(JSON.stringify(value.windows), polygon, value.heightCm);
+if (!doors || !windows || doors.some(function (door) {
+    return doors.some(function (other) {
+        return other !== door && other.edgeIndex === door.edgeIndex &&
+            door.t0 < other.t1 && other.t0 < door.t1;
+    }) || windows.some(function (windowItem) {
+        return door.edgeIndex === windowItem.edgeIndex &&
+            door.t0 < windowItem.t1 && windowItem.t0 < door.t1;
+    });
+})) return null;
+return {
+    version: 1,
+    shape: value.shape,
+    widthCm: value.widthCm,
+    lengthCm: value.lengthCm,
+    heightCm: value.heightCm,
+    polygon: polygon,
+    doors: doors,
+    windows: windows,
+    wallColor: value.wallColor.toUpperCase(),
+    transparentWalls: value.transparentWalls,
+    floorTexture: value.floorTexture
+};
+}
+function applyRoomConfig(config) {
+room.w = config.widthCm; room.l = config.lengthCm; room.h = config.heightCm;
+room.shape = config.shape;
+room.customPoly = config.shape === 'custom' ? config.polygon : null;
+room.customDoors = config.shape === 'custom' ? config.doors : [];
+room.customWindows = config.shape === 'custom' ? config.windows : [];
+room.wallColor = config.wallColor;
+room.transparentWalls = config.transparentWalls;
+room.floorTexture = config.floorTexture;
+$('#rw').value = room.w; $('#rl').value = room.l; $('#rh').value = room.h;
+document.querySelectorAll('input[name=shape]').forEach(function (input) { input.checked = input.value === room.shape; });
+$('#sh-custom').disabled = !room.customPoly;
+$('#wallColor').value = room.wallColor;
+$('#wallColor').setCustomValidity(''); $('#wallColor').setAttribute('aria-invalid', 'false'); $('#wallColorError').hidden = true;
+$('#transparentWalls').checked = room.transparentWalls;
+$('#floorTexture').value = room.floorTexture;
+roomChanged();
+}
+function setRoomStorageStatus(message) {
+var status = $('#roomStorageStatus');
+status.textContent = message || '';
+status.hidden = !message;
+}
+function persistRoomConfig() {
+if (!roomPersistenceEnabled || !window.RoomfitRoomStorage) return;
+try {
+    window.RoomfitRoomStorage.write(roomConfigSnapshot());
+    setRoomStorageStatus('');
+} catch (error) {
+    console.error('Could not save room settings.', error);
+    setRoomStorageStatus('Room settings could not be saved in this browser: ' + error.message);
+}
+}
+function restoreRoomConfig() {
+if (!window.RoomfitRoomStorage) return false;
+try {
+    var stored = window.RoomfitRoomStorage.read();
+    if (!stored) return false;
+    var config = validatedRoomConfig(stored);
+    if (!config) {
+        roomStorageRestoreFailed = true;
+        setRoomStorageStatus('Saved room settings are invalid and were not loaded.');
+        return false;
+    }
+    applyRoomConfig(config);
+    return true;
+} catch (error) {
+    roomStorageRestoreFailed = true;
+    console.error('Could not read saved room settings.', error);
+    setRoomStorageStatus('Saved room settings could not be read: ' + error.message);
+    return false;
+}
+}
+function validateSavedFurniture(value, id) {
+if (!value || typeof value !== 'object' ||
+    typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120 ||
+    typeof value.material !== 'string' || value.material.length > 120 ||
+    typeof value.cat !== 'string' || !/^[a-z0-9_-]{1,32}$/i.test(value.cat) ||
+    ['rect', 'round', 'L'].indexOf(value.shape) < 0 ||
+    !Number.isFinite(value.w) || value.w < 10 || value.w > 500 ||
+    !Number.isFinite(value.d) || value.d < 10 || value.d > 500 ||
+    !Number.isFinite(value.h) || value.h < 1 || value.h > 300 ||
+    !Number.isFinite(value.price) || value.price < 0 || value.price > 20000 ||
+    !Number.isFinite(value.x) || Math.abs(value.x) > 10000 ||
+    !Number.isFinite(value.y) || Math.abs(value.y) > 10000 ||
+    !Number.isFinite(value.rot) || Math.abs(value.rot) > 100000 ||
+    typeof value.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(value.color) ||
+    typeof value.url !== 'string' || value.url.length > 2048) return null;
+var url;
+try { url = new URL(value.url); } catch (error) { return null; }
+if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+var image = null;
+if (value.image) {
+    try {
+        var imageUrl = new URL(value.image);
+        if ((imageUrl.protocol !== 'http:' && imageUrl.protocol !== 'https:') ||
+            !isIkeaHostname(imageUrl.hostname)) return null;
+        image = imageUrl.href;
+    } catch (error) {
+        return null;
+    }
+}
+var provenance = value.prov && typeof value.prov === 'object' ? value.prov : {};
+function source(field) { return provenance[field] === 'link' ? 'link' : 'estimated'; }
+return {
+    id: id,
+    name: value.name.trim(),
+    cat: value.cat,
+    w: value.w,
+    d: value.d,
+    h: value.h,
+    shape: value.shape,
+    color: value.color.toUpperCase(),
+    material: value.material,
+    price: value.price,
+    x: value.x,
+    y: value.y,
+    rot: (value.rot % 360 + 360) % 360,
+    url: url.href,
+    retailer: typeof value.retailer === 'string' ? value.retailer.slice(0, 100) : cap(url.hostname.split('.')[0]),
+    image: image,
+    prov: { size: source('size'), colour: source('colour'), material: source('material'), price: source('price') }
+};
+}
+function setDesignStatus(message, isError) {
+var status = $('#designStatus');
+status.textContent = message || '';
+status.classList.toggle('error-text', Boolean(isError));
+}
+function saveDesignToFile() {
+try {
+    var name = $('#designName').value.trim().slice(0, 80) || 'Roomfit design';
+    var design = {
+        format: 'roomfit-design',
+        version: 1,
+        name: name,
+        savedAt: new Date().toISOString(),
+        room: roomConfigSnapshot(),
+        furniture: items
+    };
+    var blob = new Blob([JSON.stringify(design, null, 2)], { type: 'application/json' });
+    var link = document.createElement('a');
+    var filename = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'roomfit-design';
+    var objectUrl = URL.createObjectURL(blob);
+    link.href = objectUrl;
+    link.download = filename + '.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 1000);
+    setDesignStatus('Saved ' + name + ' as a JSON file.');
+} catch (error) {
+    console.error('Could not save the design file.', error);
+    setDesignStatus('The design file could not be saved: ' + error.message, true);
+}
+}
+function loadDesignFile(file) {
+if (!file) return;
+if (file.size > 5 * 1024 * 1024) {
+    setDesignStatus('Choose a design file smaller than 5 MB.', true);
+    return;
+}
+var reader = new FileReader();
+reader.onerror = function () {
+    var message = reader.error ? reader.error.message : 'The file could not be read.';
+    setDesignStatus(message, true);
+};
+reader.onload = function () {
+    try {
+        var text = String(reader.result || '').replace(/^\uFEFF/, '');
+        var design = JSON.parse(text);
+        if (!design || design.format !== 'roomfit-design' || design.version !== 1 ||
+            !Array.isArray(design.furniture) || design.furniture.length > 100) {
+            throw new Error('This is not a supported Roomfit design file.');
+        }
+        var config = validatedRoomConfig(design.room);
+        if (!config) throw new Error('The saved room configuration is invalid.');
+        var loadedItems = design.furniture.map(function (item, index) {
+            return validateSavedFurniture(item, index + 1);
+        });
+        if (loadedItems.some(function (item) { return !item; })) {
+            throw new Error('The design contains invalid furniture data.');
+        }
+        applyRoomConfig(config);
+        items = loadedItems;
+        uid = items.length + 1;
+        selId = items.length ? items[0].id : null;
+        if (typeof design.name === 'string' && design.name.trim()) $('#designName').value = design.name.slice(0, 80);
+        edited();
+        fillEditor();
+        setDesignStatus('Loaded ' + $('#designName').value + '.');
+    } catch (error) {
+        console.error('Could not load the design file.', error);
+        setDesignStatus('The design file could not be loaded: ' + error.message, true);
+    } finally {
+        $('#designFile').value = '';
+    }
+};
+reader.readAsText(file);
+}
+$('#saveDesign').addEventListener('click', saveDesignToFile);
+$('#loadDesign').addEventListener('click', function () { $('#designFile').click(); });
+$('#designFile').addEventListener('change', function () { loadDesignFile(this.files && this.files[0]); });
+$('#editRoomLink').addEventListener('click', persistRoomConfig);
 $('#resetBtn').addEventListener('click', resetRoom);
 
 /* =====================================================
@@ -1129,8 +1413,9 @@ var floor = new THREE.Mesh(fg, new THREE.MeshLambertMaterial({
 T.roomG.add(floor);
 /* walls */
 var wallCol = new THREE.Color(room.wallColor);
-var detectedDoors = room.shape === 'custom' ? customDoorGeometries(poly) : [];
-var detectedWindows = room.shape === 'custom' ? customWindowGeometries(poly) : [];
+var detectedDoors = roomDoorGeometries(poly);
+var detectedWindows = roomWindowGeometries(poly);
+var doorwayHeight = Math.min(205, H - 10);
 function addWallSegment(start, end, baseY, segmentHeight) {
     var dx = end[0] - start[0], dz = end[1] - start[1], len = Math.hypot(dx, dz);
     baseY = Number.isFinite(baseY) ? baseY : 0;
@@ -1172,6 +1457,10 @@ for (var i = 0; i < poly.length; i++) {
             var aboveWindow = H - opening.sillHeightCm - opening.heightCm;
             if (aboveWindow > 0) addWallSegment(windowStart, windowEnd,
                 opening.sillHeightCm + opening.heightCm, aboveWindow);
+        } else if (doorwayHeight < H) {
+            var doorStart = [a[0] + (b[0] - a[0]) * start, a[1] + (b[1] - a[1]) * start];
+            var doorEnd = [a[0] + (b[0] - a[0]) * end, a[1] + (b[1] - a[1]) * end];
+            addWallSegment(doorStart, doorEnd, doorwayHeight, H - doorwayHeight);
         }
     });
     if (cursor < 1) addWallSegment(
@@ -1183,8 +1472,8 @@ detectedDoors.forEach(function (door) {
     var dx = door.swingEnd[0] - door.hinge[0], dz = door.swingEnd[1] - door.hinge[1];
     var length = Math.hypot(dx, dz);
     if (length < 1) return;
-    var leaf = new THREE.Mesh(new THREE.BoxGeometry(length, 205, 6), new THREE.MeshLambertMaterial({ color: 0xA9805A }));
-    leaf.position.set((door.hinge[0] + door.swingEnd[0]) / 2 - cx, 102.5, (door.hinge[1] + door.swingEnd[1]) / 2 - cy);
+    var leaf = new THREE.Mesh(new THREE.BoxGeometry(length, doorwayHeight, 6), new THREE.MeshLambertMaterial({ color: 0xA9805A }));
+    leaf.position.set((door.hinge[0] + door.swingEnd[0]) / 2 - cx, doorwayHeight / 2, (door.hinge[1] + door.swingEnd[1]) / 2 - cy);
     leaf.rotation.y = -Math.atan2(dz, dx);
     leaf.add(new THREE.LineSegments(new THREE.EdgesGeometry(leaf.geometry), new THREE.LineBasicMaterial({ color: 0x3E3026 })));
     T.roomG.add(leaf);
@@ -1219,15 +1508,6 @@ detectedWindows.forEach(function (windowItem) {
     glassGroup.add(topFrame, bottomFrame, leftFrame, rightFrame);
     T.roomG.add(glassGroup);
 });
-if (room.shape !== 'custom') {
-    var op = roomOpenings(room);
-    var win = new THREE.Mesh(new THREE.BoxGeometry(op.win.x1 - op.win.x0, 110, 10), new THREE.MeshLambertMaterial({
-        color: 0xd7f3f6, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide
-    }));
-    win.position.set((op.win.x0 + op.win.x1) / 2 - cx, 95 + 55, op.win.y - cy); T.roomG.add(win);
-    var door = new THREE.Mesh(new THREE.BoxGeometry(op.door.x1 - op.door.x0, 205, 10), new THREE.MeshLambertMaterial({ color: 0xA9805A }));
-    door.position.set((op.door.x0 + op.door.x1) / 2 - cx, 102.5, op.door.y - cy); T.roomG.add(door);
-}
 /* furniture */
 items.forEach(function (it) { var g = build3DItem(it); T.itemsG.add(g); T.groups[it.id] = g; });
 orbit.dist = clamp(Math.max(room.w, room.l) * 1.5, 450, 2200);
@@ -1278,7 +1558,10 @@ new MutationObserver(function () { drawPlan(); updateStats(); if (T.ready) rebui
 /* ---------- boot ---------- */
 bindEditor();
 resetRoom();
-applyImportedRoom();
+var restoredRoom = restoreRoomConfig();
+var importedRoom = applyImportedRoom();
+roomPersistenceEnabled = true;
+if (restoredRoom || importedRoom || !roomStorageRestoreFailed) persistRoomConfig();
 if (window.ResizeObserver) new ResizeObserver(function () { if (!$('#planBox').hidden) { sizePlan(); drawPlan(); } }).observe($('#planBox'));
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { drawPlan(); });
 })();

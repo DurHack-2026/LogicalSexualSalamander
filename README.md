@@ -24,7 +24,9 @@ Open `http://127.0.0.1:3000`. The room starts empty; paste IKEA product URLs one
 
 The static room editor and 2D/3D room views can be hosted on GitHub Pages. Pages serves `index.html`, which forwards to `Roomfit.html`. Product-link extraction is not available from Pages alone: it calls the `/api/` endpoints in `server.js`, and GitHub Pages cannot run that Node server. To enable extraction, deploy the API separately, update the frontend to call its URL, and configure the API's CORS policy; keep provider credentials on the server.
 
-Select **Design room shape** to open the manual editor. Drag room corners, add or remove corners to draw an outline, and click a wall to add a door or window. Set room dimensions, door width, hinge side, and swing direction; windows have editable width, sill height, and glass height. Roomfit renders windows as lightly tinted transparent glass and retains the wall above and below each opening.
+Select **Design room shape** to open the manual editor. Drag room corners, add or remove corners to draw an outline, and click a wall to add a door or window. Set room dimensions, door width, hinge side, and swing direction; windows have editable width, sill height, and glass height. Preset and editor-added windows use the same framed, lightly tinted glass and wall opening in 3D. Doorways retain a wall lintel above the frame.
+
+Room dimensions, shape, doors, windows, wall colour, transparency, and floor texture are saved in the browser so they remain when moving between Roomfit and the room editor. **Reset room design** restores the editor's default rectangle, dimensions, and openings. Furniture is not saved automatically; use **Design files** to download a JSON file containing the room and furniture layout, or load a previously saved file.
 
 `product-extractor.js` reads JSON-LD, product specifications, accordion text, and IKEA image candidates from the returned HTML. The optional LLM endpoint can help recover specifications not found by these parsers. To configure one, copy `.env.example` to `.env` and set:
 

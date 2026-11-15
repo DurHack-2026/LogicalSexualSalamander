@@ -19,6 +19,7 @@ const STATIC_FILES = {
     '/style.css': ['style.css', 'text/css; charset=utf-8'],
     '/roomfit.js': ['roomfit.js', 'text/javascript; charset=utf-8'],
     '/floorplan.js': ['floorplan.js', 'text/javascript; charset=utf-8'],
+    '/room-config-storage.js': ['room-config-storage.js', 'text/javascript; charset=utf-8'],
     '/ai_studio_code.js': ['ai_studio_code.js', 'text/javascript; charset=utf-8'],
     '/product-extractor.js': ['product-extractor.js', 'text/javascript; charset=utf-8']
 };

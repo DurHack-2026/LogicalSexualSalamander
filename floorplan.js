@@ -16,6 +16,10 @@ var SVG_NS = 'http://www.w3.org/2000/svg';
 var MAX_CORNERS = 100;
 var MAX_DOORS = 12;
 var MAX_WINDOWS = 12;
+var roomShape = 'custom';
+var roomAppearance = { wallColor: '#2B3A35', transparentWalls: true, floorTexture: 'wood' };
+var roomStorageReady = false;
+var roomStorageTimer = null;
 
 function roomWidth() { return Number($('#roomWidth').value); }
 function roomLength() { return Number($('#roomLength').value); }
@@ -215,6 +219,138 @@ function validationError() {
         }
     }
     return '';
+}
+
+function storedOpeningWidth(opening, points, width, length) {
+    var a = points[opening.edgeIndex], b = points[(opening.edgeIndex + 1) % points.length];
+    return Math.round(Math.hypot((b[0] - a[0]) * width, (b[1] - a[1]) * length) *
+        (opening.t1 - opening.t0) * 1000) / 1000;
+}
+
+function restoreRoomConfig() {
+    var config = window.RoomfitRoomStorage.read();
+    if (!config) return '';
+    if (!config || config.version !== 1 ||
+        ['rect', 'L', 'bay', 'custom'].indexOf(config.shape) < 0 ||
+        !Number.isFinite(config.widthCm) || config.widthCm < 200 || config.widthCm > 1200 ||
+        !Number.isFinite(config.lengthCm) || config.lengthCm < 200 || config.lengthCm > 1200 ||
+        !Number.isFinite(config.heightCm) || config.heightCm < 200 || config.heightCm > 400 ||
+        !Array.isArray(config.polygon) || !validPolygon(config.polygon) ||
+        !Array.isArray(config.doors) || config.doors.length > MAX_DOORS ||
+        !Array.isArray(config.windows) || config.windows.length > MAX_WINDOWS) {
+        return 'Saved room settings are invalid and were not loaded.';
+    }
+
+    var savedDoors = config.doors.map(function (door) {
+        if (!door || !Number.isInteger(door.edgeIndex) || door.edgeIndex < 0 || door.edgeIndex >= config.polygon.length ||
+            !Number.isFinite(door.t0) || !Number.isFinite(door.t1) || door.t0 < 0 || door.t1 > 1 ||
+            door.t1 - door.t0 < 0.02 || typeof door.hingeAtStart !== 'boolean' ||
+            typeof door.swingInward !== 'boolean' || !Number.isFinite(door.confidence) ||
+            door.confidence < 0 || door.confidence > 1) return null;
+        var copy = Object.assign({}, door);
+        copy.widthCm = storedOpeningWidth(copy, config.polygon, config.widthCm, config.lengthCm);
+        copy.tooWide = copy.widthCm < 60 || copy.widthCm > 140;
+        return copy;
+    });
+    var savedWindows = config.windows.map(function (windowItem) {
+        if (!windowItem || !Number.isInteger(windowItem.edgeIndex) ||
+            windowItem.edgeIndex < 0 || windowItem.edgeIndex >= config.polygon.length ||
+            !Number.isFinite(windowItem.t0) || !Number.isFinite(windowItem.t1) ||
+            windowItem.t0 < 0 || windowItem.t1 > 1 || windowItem.t1 - windowItem.t0 < 0.02 ||
+            !Number.isFinite(windowItem.sillHeightCm) || windowItem.sillHeightCm < 0 ||
+            !Number.isFinite(windowItem.heightCm) || windowItem.heightCm < 40 ||
+            windowItem.sillHeightCm + windowItem.heightCm > config.heightCm ||
+            !Number.isFinite(windowItem.confidence) || windowItem.confidence < 0 || windowItem.confidence > 1) return null;
+        var copy = Object.assign({}, windowItem);
+        copy.widthCm = storedOpeningWidth(copy, config.polygon, config.widthCm, config.lengthCm);
+        copy.invalid = copy.widthCm < 60 || copy.widthCm > 240;
+        return copy;
+    });
+    if (savedDoors.some(function (door) { return !door || door.tooWide; }) ||
+        savedWindows.some(function (windowItem) { return !windowItem || windowItem.invalid; })) {
+        return 'Saved door or window dimensions are invalid and were not loaded.';
+    }
+    for (var i = 0; i < savedDoors.length; i++) {
+        for (var j = i + 1; j < savedDoors.length; j++) {
+            if (savedDoors[i].edgeIndex === savedDoors[j].edgeIndex &&
+                savedDoors[i].t0 < savedDoors[j].t1 && savedDoors[j].t0 < savedDoors[i].t1) {
+                return 'Saved doors overlap and were not loaded.';
+            }
+        }
+        if (savedWindows.some(function (windowItem) {
+            return savedDoors[i].edgeIndex === windowItem.edgeIndex &&
+                savedDoors[i].t0 < windowItem.t1 && windowItem.t0 < savedDoors[i].t1;
+        })) return 'A saved door overlaps a window; room settings were not loaded.';
+    }
+    for (var windowIndex = 0; windowIndex < savedWindows.length; windowIndex++) {
+        for (var otherWindow = windowIndex + 1; otherWindow < savedWindows.length; otherWindow++) {
+            if (savedWindows[windowIndex].edgeIndex === savedWindows[otherWindow].edgeIndex &&
+                savedWindows[windowIndex].t0 < savedWindows[otherWindow].t1 &&
+                savedWindows[otherWindow].t0 < savedWindows[windowIndex].t1) {
+                return 'Saved windows overlap and were not loaded.';
+            }
+        }
+    }
+    if (!/^#[0-9a-f]{6}$/i.test(config.wallColor) ||
+        typeof config.transparentWalls !== 'boolean' ||
+        ['wood', 'carpet', 'marble'].indexOf(config.floorTexture) < 0) {
+        return 'Saved wall or floor settings are invalid and were not loaded.';
+    }
+
+    poly = config.polygon.map(function (point) { return point.slice(); });
+    doors = savedDoors;
+    windows = savedWindows;
+    roomShape = config.shape;
+    $('#roomWidth').value = config.widthCm;
+    $('#roomLength').value = config.lengthCm;
+    $('#roomHeight').value = config.heightCm;
+    roomAppearance = {
+        wallColor: config.wallColor.toUpperCase(),
+        transparentWalls: config.transparentWalls,
+        floorTexture: config.floorTexture
+    };
+    return '';
+}
+
+function saveRoomConfig() {
+    if (!roomStorageReady || validationError()) return;
+    if (roomStorageTimer) window.clearTimeout(roomStorageTimer);
+    roomStorageTimer = null;
+    try {
+        window.RoomfitRoomStorage.write({
+            version: 1,
+            shape: roomShape,
+            widthCm: roomWidth(),
+            lengthCm: roomLength(),
+            heightCm: roomHeight(),
+            polygon: poly.map(function (point) { return point.slice(); }),
+            doors: doors.map(function (door) {
+                return {
+                    edgeIndex: door.edgeIndex, t0: door.t0, t1: door.t1,
+                    hingeAtStart: door.hingeAtStart, swingInward: door.swingInward, confidence: door.confidence
+                };
+            }),
+            windows: windows.map(function (windowItem) {
+                return {
+                    edgeIndex: windowItem.edgeIndex, t0: windowItem.t0, t1: windowItem.t1,
+                    sillHeightCm: windowItem.sillHeightCm, heightCm: windowItem.heightCm,
+                    confidence: windowItem.confidence
+                };
+            }),
+            wallColor: roomAppearance.wallColor,
+            transparentWalls: roomAppearance.transparentWalls,
+            floorTexture: roomAppearance.floorTexture
+        });
+    } catch (error) {
+        console.error('Could not save room settings.', error);
+        setStatus('Room settings could not be saved in this browser: ' + error.message, true);
+    }
+}
+
+function scheduleRoomConfigSave() {
+    if (!roomStorageReady || validationError()) return;
+    if (roomStorageTimer) window.clearTimeout(roomStorageTimer);
+    roomStorageTimer = window.setTimeout(saveRoomConfig, 150);
 }
 
 function updateApplyButton() {
@@ -451,6 +587,7 @@ function render() {
     else if (mode === 'add-door') setStatus('Click the wall where the centre of the door should go.', false);
     else if (mode === 'add-window') setStatus('Click the wall where the centre of the window should go.', false);
     else setStatus('Drag a corner, add a corner, or add a door or window to shape the room.', false);
+    scheduleRoomConfigSave();
 }
 
 function distanceToSegment(point, a, b) {
@@ -517,6 +654,7 @@ function addCorner(point) {
         a[0] + (b[0] - a[0]) * split,
         a[1] + (b[1] - a[1]) * split
     ]);
+    roomShape = 'custom';
     doors = oldDoors;
     windows = oldWindows;
     selectedVertex = edgeIndex + 1;
@@ -565,6 +703,7 @@ function addDoor(point) {
         return;
     }
     doors.push(door);
+    roomShape = 'custom';
     selectedDoor = doors.length - 1;
     mode = 'idle';
     render();
@@ -615,6 +754,7 @@ function addWindow(point) {
         return;
     }
     windows.push(windowItem);
+    roomShape = 'custom';
     selectedWindow = windows.length - 1;
     mode = 'idle';
     render();
@@ -628,6 +768,7 @@ $('#addCorner').addEventListener('click', function () {
 $('#removeWindow').addEventListener('click', function () {
     if (selectedWindow < 0 || selectedWindow >= windows.length) return;
     windows.splice(selectedWindow, 1);
+    roomShape = 'custom';
     selectedWindow = -1;
     render();
 });
@@ -652,6 +793,7 @@ $('#removeCorner').addEventListener('click', function () {
         return;
     }
     poly.splice(selectedVertex, 1);
+    roomShape = 'custom';
     doors = doors.map(function (door) {
         if (door.edgeIndex > selectedVertex) door.edgeIndex--;
         return door;
@@ -672,12 +814,22 @@ $('#resetShape').addEventListener('click', function () {
     selectedDoor = -1;
     selectedWindow = -1;
     mode = 'idle';
+    $('#roomWidth').value = 420;
+    $('#roomLength').value = 360;
+    $('#roomHeight').value = 250;
+    $('#doorWidth').value = 90;
+    $('#windowWidth').value = 120;
+    $('#windowSill').value = 90;
+    $('#windowHeight').value = 110;
+    roomShape = 'custom';
     render();
+    saveRoomConfig();
 });
 
 $('#removeDoor').addEventListener('click', function () {
     if (selectedDoor < 0 || selectedDoor >= doors.length) return;
     doors.splice(selectedDoor, 1);
+    roomShape = 'custom';
     selectedDoor = -1;
     render();
 });
@@ -685,12 +837,14 @@ $('#removeDoor').addEventListener('click', function () {
 $('#flipHinge').addEventListener('click', function () {
     if (selectedDoor < 0 || selectedDoor >= doors.length) return;
     doors[selectedDoor].hingeAtStart = !doors[selectedDoor].hingeAtStart;
+    roomShape = 'custom';
     render();
 });
 
 $('#flipSwing').addEventListener('click', function () {
     if (selectedDoor < 0 || selectedDoor >= doors.length) return;
     doors[selectedDoor].swingInward = !doors[selectedDoor].swingInward;
+    roomShape = 'custom';
     render();
 });
 
@@ -698,6 +852,7 @@ $('#doorWidth').addEventListener('input', function () {
     var width = Number(this.value);
     if (selectedDoor >= 0 && selectedDoor < doors.length && Number.isFinite(width)) {
         doors[selectedDoor].widthCm = width;
+        roomShape = 'custom';
         refreshDoorGeometry();
     }
     updateApplyButton();
@@ -711,6 +866,7 @@ $('#doorWidth').addEventListener('input', function () {
             windowItem.widthCm = Number($('#windowWidth').value);
             windowItem.sillHeightCm = Number($('#windowSill').value);
             windowItem.heightCm = Number($('#windowHeight').value);
+            roomShape = 'custom';
             refreshWindowGeometry();
         }
         render();
@@ -740,6 +896,7 @@ svg.addEventListener('pointermove', function (event) {
     var point = svgEventPoint(event);
     if (!point) return;
     poly[dragVertex] = toNormalized(point);
+    roomShape = 'custom';
     refreshDoorGeometry();
     refreshWindowGeometry();
     render();
@@ -800,6 +957,7 @@ svg.addEventListener('keydown', function (event) {
     event.preventDefault();
     selectedVertex = index;
     poly[index] = [clamp(poly[index][0] + dx, 0, 1), clamp(poly[index][1] + dy, 0, 1)];
+    roomShape = 'custom';
     refreshDoorGeometry();
     refreshWindowGeometry();
     render();
@@ -819,7 +977,7 @@ $('#applyRoom').addEventListener('click', function () {
         roomWidth: String(roomWidth()),
         roomLength: String(roomLength()),
         roomHeight: String(roomHeight()),
-        roomShape: 'custom',
+        roomShape: roomShape,
         roomPoly: JSON.stringify(poly),
         roomWindows: JSON.stringify(windows.map(function (windowItem) {
             return {
@@ -842,8 +1000,20 @@ $('#applyRoom').addEventListener('click', function () {
             };
         }))
     }).toString();
+    saveRoomConfig();
     window.location.href = target.href;
 });
 
+$('#backToRoom').addEventListener('click', saveRoomConfig);
+window.addEventListener('pagehide', saveRoomConfig);
+var roomStorageMessage = '';
+try {
+    roomStorageMessage = restoreRoomConfig();
+} catch (error) {
+    console.error('Could not read saved room settings.', error);
+    roomStorageMessage = 'Saved room settings could not be read: ' + error.message;
+}
 render();
+roomStorageReady = true;
+if (roomStorageMessage) setStatus(roomStorageMessage, true);
 }());
