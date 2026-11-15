@@ -120,6 +120,108 @@ function edgeLengthCm(edgeIndex) {
     return Math.hypot((b[0] - a[0]) * roomWidth(), (b[1] - a[1]) * roomLength());
 }
 
+function presetPolygon(shape) {
+    var width = roomWidth(), length = roomLength();
+    if (shape === 'L') {
+        var cutWidth = Math.round(width * 0.4), cutLength = Math.round(length * 0.42);
+        return [
+            [0, 0], [(width - cutWidth) / width, 0],
+            [(width - cutWidth) / width, cutLength / length], [1, cutLength / length],
+            [1, 1], [0, 1]
+        ];
+    }
+    if (shape === 'bay') {
+        var bayDepth = Math.round(length * 0.16);
+        var bayLeft = Math.round(width * 0.25), bayRight = Math.round(width * 0.75);
+        return [
+            [0, bayDepth / length], [bayLeft / width, bayDepth / length],
+            [bayLeft / width, 0], [bayRight / width, 0],
+            [bayRight / width, bayDepth / length], [1, bayDepth / length],
+            [1, 1], [0, 1]
+        ];
+    }
+    if (shape === 'rect') return [[0, 0], [1, 0], [1, 1], [0, 1]];
+    return null;
+}
+
+function presetOpeningInterval(points, start, end) {
+    var width = roomWidth(), length = roomLength();
+    for (var i = 0; i < points.length; i++) {
+        var a = [points[i][0] * width, points[i][1] * length];
+        var b = [points[(i + 1) % points.length][0] * width,
+            points[(i + 1) % points.length][1] * length];
+        var dx = b[0] - a[0], dy = b[1] - a[1];
+        var lengthSquared = dx * dx + dy * dy;
+        if (!lengthSquared) continue;
+
+        function project(point) {
+            var t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSquared;
+            var nearest = [a[0] + dx * t, a[1] + dy * t];
+            return { t: t, distance: Math.hypot(point[0] - nearest[0], point[1] - nearest[1]) };
+        }
+
+        var first = project(start), second = project(end);
+        if (first.distance <= 1.5 && second.distance <= 1.5 &&
+            first.t >= -1e-6 && first.t <= 1 + 1e-6 &&
+            second.t >= -1e-6 && second.t <= 1 + 1e-6) {
+            return { edgeIndex: i, t0: Math.min(first.t, second.t), t1: Math.max(first.t, second.t) };
+        }
+    }
+    return null;
+}
+
+function applyPresetShape(shape) {
+    var width = roomWidth(), length = roomLength(), height = roomHeight();
+    if (!Number.isFinite(width) || width < 200 || width > 1200 ||
+        !Number.isFinite(length) || length < 200 || length > 1200 ||
+        !Number.isFinite(height) || height < 200 || height > 400) return false;
+    var points = presetPolygon(shape);
+    if (!points) return false;
+
+    poly = points;
+    roomShape = shape;
+    var doorStart = 30, doorEnd = Math.min(120, width - 30);
+    var doorInterval = presetOpeningInterval(poly, [doorStart, length], [doorEnd, length]);
+    doors = doorInterval ? [Object.assign(doorInterval, {
+        hingeAtStart: false,
+        swingInward: true,
+        confidence: 1,
+        widthCm: doorEnd - doorStart,
+        tooWide: false
+    })] : [];
+
+    var windowStart, windowEnd;
+    if (shape === 'L') {
+        var topWidth = Math.round(width - width * 0.4);
+        var halfWidth = Math.min(70, topWidth / 2 - 20);
+        windowStart = topWidth / 2 - halfWidth;
+        windowEnd = topWidth / 2 + halfWidth;
+    } else if (shape === 'bay') {
+        var bayWindowWidth = Math.min(240, width / 2, Math.max(60, width * 0.2));
+        windowStart = (width - bayWindowWidth) / 2;
+        windowEnd = (width + bayWindowWidth) / 2;
+    } else {
+        var halfWindow = Math.min(120, width / 4);
+        windowStart = width / 2 - halfWindow;
+        windowEnd = width / 2 + halfWindow;
+    }
+    var windowInterval = presetOpeningInterval(poly, [windowStart, 0], [windowEnd, 0]);
+    var sillHeight = 95, glassHeight = Math.min(110, height - sillHeight);
+    windows = windowInterval ? [Object.assign(windowInterval, {
+        widthCm: windowEnd - windowStart,
+        sillHeightCm: sillHeight,
+        heightCm: glassHeight,
+        confidence: 1,
+        invalid: false
+    })] : [];
+
+    $('#doorWidth').value = Math.round(doorEnd - doorStart);
+    $('#windowWidth').value = Math.round(windowEnd - windowStart);
+    $('#windowSill').value = sillHeight;
+    $('#windowHeight').value = Math.round(glassHeight);
+    return true;
+}
+
 function refreshDoorGeometry() {
     doors.forEach(function (door) {
         if (door.edgeIndex < 0 || door.edgeIndex >= poly.length) {
@@ -569,6 +671,9 @@ function renderWindowList() {
 function render() {
     refreshDoorGeometry();
     refreshWindowGeometry();
+    document.querySelectorAll('input[name=roomShape]').forEach(function (input) {
+        input.checked = input.value === roomShape;
+    });
     renderDrawing();
     renderCornerList();
     renderDoorList();
@@ -586,6 +691,7 @@ function render() {
     else if (mode === 'add-corner') setStatus('Click a wall near where you want the new corner.', false);
     else if (mode === 'add-door') setStatus('Click the wall where the centre of the door should go.', false);
     else if (mode === 'add-window') setStatus('Click the wall where the centre of the window should go.', false);
+    else if (roomShape !== 'custom') setStatus('Preset selected. Drag a corner or adjust an opening to customize it.', false);
     else setStatus('Drag a corner, add a corner, or add a door or window to shape the room.', false);
     scheduleRoomConfigSave();
 }
@@ -765,6 +871,26 @@ $('#addCorner').addEventListener('click', function () {
     render();
 });
 
+document.querySelectorAll('input[name=roomShape]').forEach(function (input) {
+    input.addEventListener('change', function () {
+        if (this.value === 'custom') {
+            roomShape = 'custom';
+            render();
+            return;
+        }
+        if (!applyPresetShape(this.value)) {
+            render();
+            setStatus('Enter valid room dimensions before choosing a preset.', true);
+            return;
+        }
+        selectedVertex = 0;
+        selectedDoor = -1;
+        selectedWindow = -1;
+        mode = 'idle';
+        render();
+    });
+});
+
 $('#removeWindow').addEventListener('click', function () {
     if (selectedWindow < 0 || selectedWindow >= windows.length) return;
     windows.splice(selectedWindow, 1);
@@ -875,8 +1001,13 @@ $('#doorWidth').addEventListener('input', function () {
 
 ['#roomWidth', '#roomLength', '#roomHeight'].forEach(function (selector) {
     $(selector).addEventListener('input', function () {
-        refreshDoorGeometry();
-        refreshWindowGeometry();
+        if (roomShape !== 'custom' && applyPresetShape(roomShape)) {
+            selectedDoor = -1;
+            selectedWindow = -1;
+        } else {
+            refreshDoorGeometry();
+            refreshWindowGeometry();
+        }
         render();
     });
 });

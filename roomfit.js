@@ -731,6 +731,7 @@ color: $('#ed-color'), shape: $('#ed-shape'), rot: $('#ed-rot')
 };
 function fillEditor(keepFocus) {
 var it = getSel();
+$('#editor').hidden = !it;
 $('#edEmpty').hidden = !!it; $('#edBody').hidden = !it;
 if (!it) return;
 if (!keepFocus || document.activeElement === cv) {
@@ -775,7 +776,8 @@ rows.forEach(function (row, i) { var d = row.querySelector('.dot'); if (d && ite
 function edited() { renderList(); drawPlan(); updateStats(); rebuild3D(); }
 function roomChanged() {
 var area = polyArea(roomPoly(room)) / 10000;
-$('#roomSummary').textContent = (room.w / 100).toFixed(1) + ' × ' + (room.l / 100).toFixed(1) + ' m, ' + (room.h / 100).toFixed(2) + ' m ceiling · ' + area.toFixed(1) + ' m² of floor';
+var shapeName = { rect: 'Rectangle', L: 'L-shape', bay: 'Bay', custom: 'Custom outline' }[room.shape] || 'Rectangle';
+$('#roomSummary').textContent = shapeName + ' · ' + (room.w / 100).toFixed(1) + ' × ' + (room.l / 100).toFixed(1) + ' m, ' + (room.h / 100).toFixed(2) + ' m ceiling · ' + area.toFixed(1) + ' m² of floor';
 sizePlan(); edited(); persistRoomConfig();
 }
 
@@ -784,17 +786,10 @@ function readRoom() {
 var w = +$('#rw').value, l = +$('#rl').value, h = +$('#rh').value;
 if (!(w >= 200 && w <= 1200 && l >= 200 && l <= 1200 && h >= 200 && h <= 400)) return;
 room.w = w; room.l = l; room.h = h;
-var sh = document.querySelector('input[name=shape]:checked'); room.shape = sh ? sh.value : 'rect';
 roomChanged();
 }
 function readWallColor() {
-var input = $('#wallColor'), value = input.value.trim();
-var valid = /^#[0-9a-f]{6}$/i.test(value);
-input.setCustomValidity(valid ? '' : 'Enter a six-digit hex colour, e.g. #2B3A35.');
-input.setAttribute('aria-invalid', String(!valid));
-$('#wallColorError').hidden = valid;
-if (!valid) return;
-room.wallColor = value.toUpperCase();
+room.wallColor = $('#wallColor').value.toUpperCase();
 drawPlan();
 if (T.ready) rebuild3D();
 persistRoomConfig();
@@ -811,7 +806,6 @@ if (T.ready) rebuild3D();
 persistRoomConfig();
 }
 ['#rw', '#rl', '#rh'].forEach(function (s) { $(s).addEventListener('input', readRoom); });
-document.querySelectorAll('input[name=shape]').forEach(function (r) { r.addEventListener('change', readRoom); });
 $('#wallColor').addEventListener('input', readWallColor);
 $('#transparentWalls').addEventListener('change', readWallTransparency);
 $('#floorTexture').addEventListener('change', readFloorTexture);
@@ -897,10 +891,8 @@ function resetRoom() {
 uid = 1; items = []; selId = null;
 var defaultWallColor = cssv('--wall') || '#2B3A35';
 room = { shape: 'rect', customPoly: null, customDoors: [], customWindows: [], w: 420, l: 360, h: 250, wallColor: defaultWallColor, transparentWalls: true, floorTexture: 'wood' };
-$('#rw').value = 420; $('#rl').value = 360; $('#rh').value = 250; $('#sh-rect').checked = true;
-$('#sh-custom').checked = false; $('#sh-custom').disabled = true;
+$('#rw').value = 420; $('#rl').value = 360; $('#rh').value = 250;
 $('#wallColor').value = defaultWallColor.toUpperCase();
-$('#wallColor').setCustomValidity(''); $('#wallColor').setAttribute('aria-invalid', 'false'); $('#wallColorError').hidden = true;
 $('#transparentWalls').checked = true;
 $('#floorTexture').value = 'wood';
 roomChanged(); fillEditor();
@@ -932,8 +924,6 @@ if (shape !== 'L' && shape !== 'bay' && shape !== 'custom') shape = 'rect';
 room.w = width; room.l = length; room.h = height; room.shape = shape;
 room.customPoly = customPoly; room.customDoors = customDoors || []; room.customWindows = customWindows;
 $('#rw').value = width; $('#rl').value = length; $('#rh').value = height;
-document.querySelectorAll('input[name=shape]').forEach(function (input) { input.checked = input.value === shape; });
-$('#sh-custom').disabled = !customPoly;
 roomChanged();
 if (invalidCustomPoly) $('#roomSummary').textContent += ' · the imported outline was invalid; using a rectangle instead.';
 if (invalidDoorData) $('#roomSummary').textContent += ' · detected door data was invalid and has been ignored.';
@@ -1095,10 +1085,7 @@ room.wallColor = config.wallColor;
 room.transparentWalls = config.transparentWalls;
 room.floorTexture = config.floorTexture;
 $('#rw').value = room.w; $('#rl').value = room.l; $('#rh').value = room.h;
-document.querySelectorAll('input[name=shape]').forEach(function (input) { input.checked = input.value === room.shape; });
-$('#sh-custom').disabled = !room.customPoly;
 $('#wallColor').value = room.wallColor;
-$('#wallColor').setCustomValidity(''); $('#wallColor').setAttribute('aria-invalid', 'false'); $('#wallColorError').hidden = true;
 $('#transparentWalls').checked = room.transparentWalls;
 $('#floorTexture').value = room.floorTexture;
 roomChanged();
@@ -1279,6 +1266,7 @@ var orbit = { az: 0.75, pol: 1.0, dist: 700 };
 function box3(g, w, h, d, x, y, z, color) {
 var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshLambertMaterial({ color: color }));
 m.position.set(x, y + h / 2, z);
+m.castShadow = true; m.receiveShadow = true;
 m.add(new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22 })));
 g.add(m); return m;
 }
@@ -1286,7 +1274,7 @@ function cyl3(g, rt, rb, h, x, y, z, color, extra) {
 var mat = new THREE.MeshLambertMaterial({ color: color });
 if (extra && extra.emissive) { mat.emissive = new THREE.Color(extra.emissive); }
 var m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 28), mat);
-m.position.set(x, y + h / 2, z); g.add(m); return m;
+m.position.set(x, y + h / 2, z); m.castShadow = true; m.receiveShadow = true; g.add(m); return m;
 }
 function shade(hex, f) { var c = new THREE.Color(hex); c.multiplyScalar(f); return c; }
 function build3DItem(it) {
@@ -1350,7 +1338,8 @@ if (cat === 'sofa' || cat === 'armchair') {
 } else if (cat === 'plant') {
     cyl3(g, w * 0.28, w * 0.2, h * 0.28, 0, 0, 0, 0xB5A58F);
     var f = new THREE.Mesh(new THREE.SphereGeometry(w * 0.5, 16, 12), new THREE.MeshLambertMaterial({ color: col }));
-    f.position.set(0, h * 0.28 + w * 0.45, 0); f.scale.set(1, 1.4, 1); g.add(f);
+    f.position.set(0, h * 0.28 + w * 0.45, 0); f.scale.set(1, 1.4, 1);
+    f.castShadow = true; f.receiveShadow = true; g.add(f);
 } else if (L) {
     var cw2 = w * 0.45, cd2 = d * 0.5;
     box3(g, w - cw2, h, d, -cw2 / 2, 0, 0, col); box3(g, w, h, d - cd2, 0, 0, cd2 / 2, col);
@@ -1370,11 +1359,18 @@ if (!window.THREE) { $('#three').innerHTML = '<div class="fallback">The 3D libra
 var el = $('#three');
 T.renderer = new THREE.WebGLRenderer({ antialias: true });
 T.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+T.renderer.shadowMap.enabled = true;
+T.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 el.appendChild(T.renderer.domElement);
 T.scene = new THREE.Scene();
 T.camera = new THREE.PerspectiveCamera(45, 1, 5, 6000);
 T.scene.add(new THREE.HemisphereLight(0xfff7e8, 0x7d8988, 0.65));
 T.ceilingLight = new THREE.PointLight(0xfff1dc, 1.1, 0, 2);
+T.ceilingLight.castShadow = true;
+T.ceilingLight.shadow.mapSize.set(512, 512);
+T.ceilingLight.shadow.bias = -0.0005;
+T.ceilingLight.shadow.normalBias = 0.02;
+T.ceilingLight.shadow.radius = 3;
 T.scene.add(T.ceilingLight);
 T.root = new THREE.Group(); T.scene.add(T.root);
 T.roomG = new THREE.Group(); T.itemsG = new THREE.Group(); T.root.add(T.roomG, T.itemsG);
@@ -1404,12 +1400,15 @@ clearGroup(T.roomG); clearGroup(T.itemsG); T.groups = {};
 var poly = roomPoly(room), cx = room.w / 2, cy = room.l / 2, H = room.h;
 T.ceilingLight.position.set(0, H - 12, 0);
 T.ceilingLight.distance = Math.max(room.w, room.l) * 3;
+T.ceilingLight.shadow.camera.far = T.ceilingLight.distance;
+T.ceilingLight.shadow.camera.updateProjectionMatrix();
 /* floor */
 var shp = new THREE.Shape(poly.map(function (p) { return new THREE.Vector2(p[0] - cx, -(p[1] - cy)); }));
 var fg = new THREE.ShapeGeometry(shp); fg.rotateX(-Math.PI / 2);
 var floor = new THREE.Mesh(fg, new THREE.MeshLambertMaterial({
     map: getThreeFloorTexture(room.floorTexture), side: THREE.DoubleSide
 }));
+floor.receiveShadow = true;
 T.roomG.add(floor);
 /* walls */
 var wallCol = new THREE.Color(room.wallColor);
@@ -1425,6 +1424,7 @@ function addWallSegment(start, end, baseY, segmentHeight) {
     var wm = new THREE.Mesh(new THREE.BoxGeometry(len, segmentHeight, 8), new THREE.MeshLambertMaterial({
         color: wallCol, transparent: room.transparentWalls, opacity: wallOpacity, depthWrite: !room.transparentWalls
     }));
+    wm.castShadow = true; wm.receiveShadow = true;
     wm.position.set((start[0] + end[0]) / 2 - cx, baseY + segmentHeight / 2, (start[1] + end[1]) / 2 - cy); wm.rotation.y = -ang;
     wm.add(new THREE.LineSegments(new THREE.EdgesGeometry(wm.geometry), new THREE.LineBasicMaterial({
         color: wallCol, transparent: room.transparentWalls, opacity: room.transparentWalls ? 0.6 : 1
@@ -1473,6 +1473,7 @@ detectedDoors.forEach(function (door) {
     var length = Math.hypot(dx, dz);
     if (length < 1) return;
     var leaf = new THREE.Mesh(new THREE.BoxGeometry(length, doorwayHeight, 6), new THREE.MeshLambertMaterial({ color: 0xA9805A }));
+    leaf.castShadow = true; leaf.receiveShadow = true;
     leaf.position.set((door.hinge[0] + door.swingEnd[0]) / 2 - cx, doorwayHeight / 2, (door.hinge[1] + door.swingEnd[1]) / 2 - cy);
     leaf.rotation.y = -Math.atan2(dz, dx);
     leaf.add(new THREE.LineSegments(new THREE.EdgesGeometry(leaf.geometry), new THREE.LineBasicMaterial({ color: 0x3E3026 })));
@@ -1494,6 +1495,7 @@ detectedWindows.forEach(function (windowItem) {
             color: 0xd7f3f6, transparent: true, opacity: 0.16,
             depthWrite: false, side: THREE.DoubleSide
         }));
+    glass.castShadow = false; glass.receiveShadow = false;
     glassGroup.add(glass);
     var frameMaterial = new THREE.MeshLambertMaterial({ color: 0xc3cecf });
     var frameDepth = 6, frameSize = 3;
@@ -1505,6 +1507,9 @@ detectedWindows.forEach(function (windowItem) {
     leftFrame.position.x = -length / 2 + frameSize / 2;
     var rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameSize, windowItem.heightCm, frameDepth), frameMaterial);
     rightFrame.position.x = length / 2 - frameSize / 2;
+    [topFrame, bottomFrame, leftFrame, rightFrame].forEach(function (frame) {
+        frame.castShadow = true; frame.receiveShadow = true;
+    });
     glassGroup.add(topFrame, bottomFrame, leftFrame, rightFrame);
     T.roomG.add(glassGroup);
 });
@@ -1539,8 +1544,8 @@ var plan = which === 'plan';
 $('#planBox').hidden = !plan; $('#threeBox').hidden = plan;
 $('#tab-plan').setAttribute('aria-selected', plan); $('#tab-3d').setAttribute('aria-selected', !plan);
 $('#stageHint').textContent = plan
-    ? 'Drag a piece to move it. With a piece selected: arrow keys nudge, R rotates 15°, Delete removes. The notch on each piece marks its front.'
-    : 'Drag to orbit, scroll to zoom. Switch back to the floor plan to move pieces.';
+    ? 'Drag to arrange pieces; select one to edit.'
+    : 'Drag to orbit the room; scroll to zoom.';
 if (plan) { sizePlan(); drawPlan(); }
 else if (init3D()) { size3D(); rebuild3D(); }
 }
